@@ -9,6 +9,8 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+matchit.workspace = true
+http.workspace = true
 
 [lints]
 workspace = true

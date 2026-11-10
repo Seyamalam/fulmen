@@ -16,3 +16,10 @@ exists. Move the `Unreleased` entries under the new version heading first.
   `-security`, `-py`), Python package with type stubs, `fulmen info` CLI.
 - Local CI/CD through `just`, git hooks, and repository guardrails.
 - Design document and v1 roadmap.
+- Router in `fulmen-core` (M1.8–M1.12): route declarations compiled into an
+  immutable `CompiledApp` (one `matchit` tree per HTTP method), typed `int`/
+  `str` path parameters returned in declaration order, automatic `HEAD`,
+  404/405 results with `Allow` (incl. `OPTIONS` metadata), route groups and
+  `mount` with exact prefix joining, strict/redirect/ignore trailing-slash
+  policy, and startup errors that aggregate duplicates, pattern conflicts,
+  and parameter-type mismatches.

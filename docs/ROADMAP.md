@@ -68,11 +68,11 @@ built on it.
 
 ### Router (`fulmen-core`)
 
-- [ ] M1.8 Route table built from declarations, frozen into `CompiledApp`
-- [ ] M1.9 `matchit` per method, static > param > catch-all
-- [ ] M1.10 Automatic `HEAD`, 404, 405 with `Allow`
-- [ ] M1.11 Route groups with prefixes, `app.mount()`
-- [ ] M1.12 Startup errors for duplicate and shadowed routes
+- [x] M1.8 Route table built from declarations, frozen into `CompiledApp`
+- [x] M1.9 `matchit` per method, static > param > catch-all
+- [x] M1.10 Automatic `HEAD`, 404, 405 with `Allow`
+- [x] M1.11 Route groups with prefixes, `app.mount()`
+- [x] M1.12 Startup errors for duplicate and shadowed routes
 
 ### Python bridge (`fulmen-py`)
 
