@@ -1,0 +1,27 @@
+"""Robyn comparison app for the M1.25 end-to-end benchmarks.
+
+Run: python -m robyn benches/e2e/apps/robyn_app.py --port 8102
+"""
+
+from robyn import Response, Robyn
+
+app = Robyn(__file__)
+
+
+@app.get("/")
+def index() -> Response:
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "text/plain"},
+        description="hello world",
+    )
+
+
+@app.get("/json")
+def json_route() -> dict[str, str]:
+    return {"message": "hello world"}
+
+
+@app.get("/items/:item_id")
+def get_item(item_id: str) -> dict[str, int]:
+    return {"item_id": int(item_id)}

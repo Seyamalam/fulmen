@@ -1,0 +1,8 @@
+# Minimum versions for the e2e comparison apps (M1.25).
+# Install with: pip install -r benches/e2e/requirements.txt
+fastapi>=0.115.6
+uvicorn[standard]>=0.30.6
+litestar>=2.12.1
+robyn>=0.60.0
+flask>=3.0.3
+gunicorn>=22.0.0
