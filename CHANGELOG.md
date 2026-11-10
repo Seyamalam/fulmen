@@ -12,6 +12,13 @@ exists. Move the `Unreleased` entries under the new version heading first.
 
 ### Added
 
+- `fulmen-server`: pure-Rust HTTP/1.1 transport on tokio + hyper with a
+  `Dispatcher` trait boundary (`serve`/`Server`, `ServerConfig`,
+  `Request`/`Response` wire types), keep-alive and pipelining, request
+  limits (431/414/413), read and keep-alive-idle timeouts, SIGINT/SIGTERM
+  and programmatic graceful shutdown with a 30 s drain deadline, cached
+  `Date` header, and a pure-Rust `TestDispatcher` for tests and
+  benchmarks. Refs: M1.1–M1.7.
 - Project skeleton: Cargo workspace (`fulmen-core`, `-server`, `-schema`,
   `-security`, `-py`), Python package with type stubs, `fulmen info` CLI.
 - Local CI/CD through `just`, git hooks, and repository guardrails.

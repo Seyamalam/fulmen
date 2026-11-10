@@ -58,13 +58,13 @@ built on it.
 
 ### Server (`fulmen-server`)
 
-- [ ] M1.1 tokio multi-thread runtime, configurable worker threads
-- [ ] M1.2 hyper 1.x HTTP/1.1 connection handling with keep-alive and pipelining
-- [ ] M1.3 `Dispatcher` trait: the server's only interface to handlers
-- [ ] M1.4 Pure-Rust test dispatcher, used for benchmarks and server tests
-- [ ] M1.5 Graceful shutdown on SIGINT/SIGTERM: stop accepting, drain, timeout
-- [ ] M1.6 Cached `Date` header, pre-encoded static headers, `mimalloc` allocator
-- [ ] M1.7 Basic limits: header size, body size, read timeouts (full set in M4)
+- [x] M1.1 tokio multi-thread runtime, configurable worker threads
+- [x] M1.2 hyper 1.x HTTP/1.1 connection handling with keep-alive and pipelining
+- [x] M1.3 `Dispatcher` trait: the server's only interface to handlers
+- [x] M1.4 Pure-Rust test dispatcher, used for benchmarks and server tests
+- [x] M1.5 Graceful shutdown on SIGINT/SIGTERM: stop accepting, drain, timeout
+- [x] M1.6 Cached `Date` header, pre-encoded static headers, `mimalloc` allocator
+- [x] M1.7 Basic limits: header size, body size, read timeouts (full set in M4)
 
 ### Router (`fulmen-core`)
 
