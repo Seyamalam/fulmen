@@ -9,6 +9,12 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

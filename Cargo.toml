@@ -18,6 +18,21 @@ fulmen-security = { path = "crates/fulmen-security", version = "0.1.0" }
 fulmen-server = { path = "crates/fulmen-server", version = "0.1.0" }
 pyo3 = "0.29.0"
 
+# HTTP transport stack for fulmen-server (DESIGN.md decision D2).
+tokio = { version = "1.48", features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+hyper = { version = "1.7", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1.3"
+bytes = "1.10"
+http-body-util = "0.1"
+
 # Guardrails. `just ci` runs clippy with `-D warnings`, so every "warn" here
 # blocks a merge. To opt out locally, use `#[expect(lint, reason = "...")]`;
 # a bare `#[allow]` without a reason is rejected.
