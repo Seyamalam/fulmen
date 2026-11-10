@@ -1,0 +1,42 @@
+# cargo-deny policy, run by `just deny` and `just ci`.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Every known vulnerability or unmaintained crate fails the build.
+# To accept one temporarily, add it to `ignore` with a reason and an issue link.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licenses only, so Fulmen stays Apache-2.0 compatible.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The TLS stack is rustls. OpenSSL must not sneak in through a dependency.
+deny = [
+    { crate = "openssl", reason = "use rustls" },
+    { crate = "openssl-sys", reason = "use rustls" },
+    { crate = "native-tls", reason = "use rustls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

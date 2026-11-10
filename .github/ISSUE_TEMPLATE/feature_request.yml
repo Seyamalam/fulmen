@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a new feature, plugin or adapter.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that Fulmen makes hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API
+      description: Show how it would look in user code.
+      render: python
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where should it live?
+      options:
+        - Core
+        - Built-in plugin
+        - Built-in adapter
+        - Third-party package (just needs an extension point)
+        - Not sure

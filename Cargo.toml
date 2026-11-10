@@ -1,0 +1,64 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["Seyamalam"]
+repository = "https://github.com/Seyamalam/fulmen"
+homepage = "https://github.com/Seyamalam/fulmen"
+
+[workspace.dependencies]
+fulmen-core = { path = "crates/fulmen-core", version = "0.1.0" }
+fulmen-schema = { path = "crates/fulmen-schema", version = "0.1.0" }
+fulmen-security = { path = "crates/fulmen-security", version = "0.1.0" }
+fulmen-server = { path = "crates/fulmen-server", version = "0.1.0" }
+pyo3 = "0.29.0"
+
+# Guardrails. `just ci` runs clippy with `-D warnings`, so every "warn" here
+# blocks a merge. To opt out locally, use `#[expect(lint, reason = "...")]`;
+# a bare `#[allow]` without a reason is rejected.
+[workspace.lints.rust]
+unsafe_code = "deny"                 # crates that need it opt in at the crate root; see scripts/guardrails.py
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+# The request path must never panic or print.
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+exit = "deny"
+mem_forget = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+allow_attributes_without_reason = "deny"
+large_futures = "warn"
+await_holding_lock = "deny"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+# panic stays "unwind": the extension catches panics at the dispatch boundary
+# and turns them into 500s (docs/DESIGN.md §14.6), and PyO3 needs unwinding
+# to raise PanicException.
+
+# Fast local builds that still optimise the hot path.
+[profile.dev.package."*"]
+opt-level = 2

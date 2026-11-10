@@ -1,0 +1,5 @@
+#!/bin/sh
+# Fast checks on every commit (~seconds). The full suite runs on pre-push.
+# Installed by `just hooks`.
+set -e
+exec just pre-commit

@@ -1,0 +1,19 @@
+#!/bin/sh
+# Local CI gate: nothing reaches GitHub without passing the full suite.
+# Installed by `just hooks`.
+set -e
+root="$(git rev-parse --show-toplevel)"
+zero=0000000000000000000000000000000000000000
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue          # deleting a remote ref
+    case "$local_ref" in refs/tags/*) continue ;; esac
+    if [ "$remote_sha" = "$zero" ]; then
+        range="origin/main..$local_sha"
+    else
+        range="$remote_sha..$local_sha"
+    fi
+    "$root/.venv/bin/python" "$root/scripts/check_commits.py" --range "$range"
+done
+
+exec just ci

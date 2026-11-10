@@ -1,0 +1,24 @@
+[package]
+name = "fulmen-py"
+description = "Python bindings for Fulmen (built with PyO3 and maturin)."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_fulmen"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true }
+fulmen-core = { workspace = true }
+fulmen-schema = { workspace = true }
+fulmen-security = { workspace = true }
+fulmen-server = { workspace = true }
+
+[lints]
+workspace = true

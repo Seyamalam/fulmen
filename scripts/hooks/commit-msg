@@ -1,0 +1,4 @@
+#!/bin/sh
+# Conventional Commits + DCO sign-off. Installed by `just hooks`.
+set -e
+exec "$(git rev-parse --show-toplevel)/.venv/bin/python" "$(git rev-parse --show-toplevel)/scripts/check_commits.py" --file "$1"

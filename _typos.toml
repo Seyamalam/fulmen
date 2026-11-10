@@ -1,0 +1,6 @@
+[files]
+extend-exclude = ["LICENSE", "Cargo.lock", "target/", ".venv/"]
+
+[default.extend-words]
+fulmen = "fulmen"
+FUL = "FUL"  # prefix of `fulmen check` rule codes (FUL001)

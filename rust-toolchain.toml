@@ -1,0 +1,5 @@
+# Pinned so local CI is reproducible. Bump deliberately, in its own commit.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+profile = "minimal"

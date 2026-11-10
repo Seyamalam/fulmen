@@ -1,0 +1,91 @@
+[build-system]
+requires = ["maturin>=1.16,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fulmen"
+description = "A hyper-fast, type-safe Python backend framework with a Rust core."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.12"
+authors = [{ name = "Seyamalam" }]
+keywords = ["web", "framework", "http", "api", "rust", "async"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/Seyamalam/fulmen"
+Issues = "https://github.com/Seyamalam/fulmen/issues"
+
+[project.optional-dependencies]
+pydantic = ["pydantic>=2.7"]
+
+[project.scripts]
+fulmen = "fulmen.cli:main"
+
+[dependency-groups]
+dev = [
+    "maturin>=1.16,<2.0",
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+]
+
+[tool.maturin]
+manifest-path = "crates/fulmen-py/Cargo.toml"
+module-name = "fulmen._fulmen"
+python-source = "python"
+exclude = ["**/__pycache__", "**/*.pyc", "**/*.pyo"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "C4", "SIM", "PIE", "RET", "RUF",
+    "S",     # security (bandit)
+    "T10",   # no breakpoint()/pdb
+    "T20",   # no print() outside the CLI
+    "BLE",   # no blind `except Exception`
+    "ASYNC", # no blocking calls in async code
+    "PERF",
+    "PT",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"python/tests/**" = ["S101"]
+"python/fulmen/cli.py" = ["T201"]
+"scripts/**" = ["T201", "S603", "S607"]
+
+[tool.coverage.run]
+source = ["fulmen"]
+branch = true
+
+[tool.coverage.report]
+# Raised milestone by milestone, see docs/ROADMAP.md. Never lowered.
+fail_under = 80
+show_missing = true
+
+[tool.pyright]
+include = ["python/fulmen", "scripts"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
