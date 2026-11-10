@@ -11,7 +11,9 @@ repository.workspace = true
 
 [lib]
 name = "_fulmen"
-crate-type = ["cdylib"]
+# `rlib` alongside `cdylib` so `cargo test`/`cargo clippy --all-targets`
+# build and run this crate's unit tests; maturin links the cdylib.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = { workspace = true }
@@ -19,6 +21,17 @@ fulmen-core = { workspace = true }
 fulmen-schema = { workspace = true }
 fulmen-security = { workspace = true }
 fulmen-server = { workspace = true }
+# `sync` (oneshot) is used for the dispatch thread-pool completion channel,
+# `bytes`/`http` for the wire types shared with fulmen-server.
+tokio = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+
+# mimalloc is the global allocator of the cdylib (DESIGN.md §25.2, M1.6). It is
+# target-specific so that platforms Fulmen does not ship wheels for keep the
+# system allocator and still build.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+mimalloc = { workspace = true }
 
 [lints]
 workspace = true

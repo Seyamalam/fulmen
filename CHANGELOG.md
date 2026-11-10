@@ -12,6 +12,22 @@ exists. Move the `Unreleased` entries under the new version heading first.
 
 ### Added
 
+- Python bridge (`fulmen-py`) and public API: `Fulmen` app with
+  `get`/`post`/`put`/`patch`/`delete`/`head`/`options` decorators and
+  `route(path, methods)`; `fulmen.Response` for explicit status/headers;
+  `app.run(host, port, workers, debug)` and `fulmen run module:app`; a
+  bounded OS-thread pool for sync handlers (GIL held only around the call);
+  return conversion `str`/`bytes`/`dict`/`list`/`tuple`/`Response` with
+  Rust-side JSON serialization; `404`/`405`+`Allow`, automatic `OPTIONS`
+  and `HEAD`, `308` trailing-slash redirects, `503`+`Retry-After` queue
+  shedding; `StartupError` aggregating Python and core declaration errors;
+  handler exceptions and dispatch panics surface as `500` with tracebacks
+  in the `fulmen` logger only; `fulmen._fulmen.serve_for_test` (plus
+  `NativeApp`/`TestServer`) for real-server tests; `mimalloc` as the
+  extension's global allocator. `async def` handlers compile and route but
+  answer `500` until M1.15 lands the asyncio bridge; `workers > 1` is
+  accepted but runs one process until M1.23. Refs: M1.6, M1.13, M1.14,
+  M1.19–M1.22.
 - `fulmen-server`: pure-Rust HTTP/1.1 transport on tokio + hyper with a
   `Dispatcher` trait boundary (`serve`/`Server`, `ServerConfig`,
   `Request`/`Response` wire types), keep-alive and pipelining, request

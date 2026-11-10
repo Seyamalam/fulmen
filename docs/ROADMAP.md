@@ -64,6 +64,9 @@ built on it.
 - [x] M1.4 Pure-Rust test dispatcher, used for benchmarks and server tests
 - [x] M1.5 Graceful shutdown on SIGINT/SIGTERM: stop accepting, drain, timeout
 - [x] M1.6 Cached `Date` header, pre-encoded static headers, `mimalloc` allocator
+      (the allocator half landed with the Python bridge: `mimalloc` is the
+      `#[global_allocator]` of the `fulmen-py` cdylib, target-gated to
+      Linux/macOS/Windows)
 - [x] M1.7 Basic limits: header size, body size, read timeouts (full set in M4)
 
 ### Router (`fulmen-core`)
@@ -76,16 +79,20 @@ built on it.
 
 ### Python bridge (`fulmen-py`)
 
-- [ ] M1.13 `Fulmen` class and route decorators (Python), declarations passed to Rust
-- [ ] M1.14 Sync dispatch: thread pool, `Python::attach` only around the call
+- [x] M1.13 `Fulmen` class and route decorators (Python), declarations passed to Rust
+- [x] M1.14 Sync dispatch: thread pool, `Python::attach` only around the call
 - [ ] M1.15 Async dispatch: asyncio loop thread, `call_soon_threadsafe`, oneshot completion
+      (seam in place: `async def` handlers compile as `HandlerKind::Async`
+      and dispatch through `dispatch_async`, which currently logs and
+      answers 500)
 - [ ] M1.16 Optional uvloop
 - [ ] M1.17 GIL batching on GIL builds (batch size and budget configurable)
 - [ ] M1.18 Free-threaded build: verified parallel sync handlers, no GIL re-enable
-- [ ] M1.19 Return conversion: `str`, `bytes`, `dict`/`list` → JSON, `Response`
-- [ ] M1.20 Unhandled exceptions → 500, traceback in logs only
-- [ ] M1.21 Rust panics caught at the dispatch boundary → 500
-- [ ] M1.22 `app.run(host, port, workers)` and `fulmen run module:app`
+- [x] M1.19 Return conversion: `str`, `bytes`, `dict`/`list` → JSON, `Response`
+- [x] M1.20 Unhandled exceptions → 500, traceback in logs only
+- [x] M1.21 Rust panics caught at the dispatch boundary → 500
+- [x] M1.22 `app.run(host, port, workers)` and `fulmen run module:app`
+      (`workers > 1` is accepted but runs a single process until M1.23)
 - [ ] M1.23 Multi-process workers with `SO_REUSEPORT` (Linux); decide Q6 for macOS/Windows
 
 ### Benchmarks
