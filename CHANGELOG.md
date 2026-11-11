@@ -10,6 +10,28 @@ exists. Move the `Unreleased` entries under the new version heading first.
 
 ## [Unreleased]
 
+### Added
+
+- Schema engine (`fulmen-schema`, M2.1–M2.5, Rust half): the `TypeDesc`
+  descriptor IR covering every type in DESIGN.md §11.1 plus the §11.2
+  constraint set, a `compile()` step that rejects invalid descriptors at
+  startup (bad regex, empty `Literal`/union, empty `Range`, non-positive
+  `MultipleOf`, unbound `TypeVar`, wrong generic arity, descriptor-depth
+  cap), and a specialized validator tree. `Validator::validate` runs
+  strict (JSON, no coercion) or lax (text sources) against a borrowed
+  `Value` model — scalars, RFC 3339/ISO 8601 time types, `UUID`, `Email`,
+  `Url`, IPv4/IPv6, containers, `Literal`, enums, `Optional`, unions with
+  a discriminator fast path, records with aliases/extra policies/defaults,
+  generic records, `NewType`, `Any`/`Raw`. Constraints run at the right
+  layer: `Len` on strings (chars) and containers, `Range`/`MultipleOf`
+  with arbitrary-precision `Decimal` semantics, `Pattern` via `regex`
+  (linear-time, no ReDoS), `Unique`, and `Strip`/`Lower`/`Upper`
+  transforms applied before checks. All violations are collected as
+  `ValidationErrors` — `{loc, code, message, limit?}` with
+  JSON-pointer locations (`/body/address/city`, `/query/page`), no input
+  echo, a `MAX_ERRORS` cap, and `max_depth`/`max_items` guardrails.
+  Dependency-light: `regex` only; no `unsafe`, no I/O, no GIL.
+
 ## [0.1.0] - 2026-11-11
 
 Milestone M1 — "fast core". First release: a real server answering requests

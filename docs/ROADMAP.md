@@ -148,11 +148,11 @@ OpenAPI at `/openapi.json` with a docs UI, Pydantic adapter.
 
 ### Schema engine (`fulmen-schema`)
 
-- [ ] M2.1 Type descriptor IR (DESIGN.md §11.3) and its conversion from Python types in `fulmen-py`
-- [ ] M2.2 Validators for scalars, time types, identifiers (`UUID`, `Email`, `Url`, IP)
-- [ ] M2.3 Containers, `Literal`, enums, `Optional`, unions, discriminated unions
-- [ ] M2.4 Records: `Model`, dataclasses, `TypedDict` (`NotRequired`), generics, `NewType`
-- [ ] M2.5 Constraints: `Len`, `Range`, `Pattern` (Rust `regex`), `MultipleOf`, `Unique`, transforms
+- [ ] M2.1 Type descriptor IR (DESIGN.md §11.3) and its conversion from Python types in `fulmen-py` — Rust half done (`TypeDesc` IR + `compile()` in `fulmen-schema`); `fulmen-py` converter remains
+- [x] M2.2 Validators for scalars, time types, identifiers (`UUID`, `Email`, `Url`, IP)
+- [x] M2.3 Containers, `Literal`, enums, `Optional`, unions, discriminated unions
+- [x] M2.4 Records: `Model`, dataclasses, `TypedDict` (`NotRequired`), generics, `NewType`
+- [x] M2.5 Constraints: `Len`, `Range`, `Pattern` (Rust `regex`), `MultipleOf`, `Unique`, transforms
 - [ ] M2.6 One-pass JSON decode + validate into Python objects; decide Q3 (JSON engine) by benchmark
 - [ ] M2.7 Strict mode for JSON, lax coercion for query/path/headers/forms
 - [ ] M2.8 Depth, item count and string length limits
