@@ -258,6 +258,9 @@ dependencies = [
 [[package]]
 name = "fulmen-schema"
 version = "0.1.0"
+dependencies = [
+ "regex",
+]
 
 [[package]]
 name = "fulmen-security"
