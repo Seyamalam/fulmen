@@ -24,10 +24,35 @@ exists. Move the `Unreleased` entries under the new version heading first.
   handler exceptions and dispatch panics surface as `500` with tracebacks
   in the `fulmen` logger only; `fulmen._fulmen.serve_for_test` (plus
   `NativeApp`/`TestServer`) for real-server tests; `mimalloc` as the
-  extension's global allocator. `async def` handlers compile and route but
-  answer `500` until M1.15 lands the asyncio bridge; `workers > 1` is
-  accepted but runs one process until M1.23. Refs: M1.6, M1.13, M1.14,
-  M1.19–M1.22.
+  extension's global allocator. Refs: M1.6, M1.13, M1.14, M1.19–M1.22.
+- Async dispatch (M1.15): `async def` handlers run on a real `asyncio` event
+  loop on a dedicated OS thread per app (`fulmen-asyncio`). Dispatch
+  materializes arguments, queues the job (1 024 deep, 5 s deadline), and
+  wakes the loop with `loop.call_soon_threadsafe`; a pump drains the queue
+  into `loop.create_task` and the done-callback completes the awaiting
+  request through a tokio oneshot. Full or overdue queues answer `503` +
+  `Retry-After`; a dead loop answers `500`.
+- uvloop selection (M1.16): `uvloop=` on `app.run`/`serve`/`serve_for_test`
+  and `--uvloop`/`--no-uvloop` on the CLI. `None` uses uvloop when
+  installed, `False` forces plain asyncio, `True` requires uvloop or fails
+  startup.
+- GIL batching (M1.17): when more sync handlers are queued than the pool
+  can run in parallel, up to `gil_batch_size` (default 32) of the surplus
+  run under one GIL acquisition — `gil_batch_size` on `app.run`/`serve`/CLI;
+  disabled on free-threaded builds. Batches only form under real backlog,
+  so small bursts still spread across the pool.
+- Free-threaded support verified (M1.18): importing `fulmen` does not
+  re-enable the GIL on free-threaded interpreters, and pool workers overlap
+  under concurrency (`test_freethreaded.py`, `just test-matrix` 3.14t leg).
+- Multi-process workers (M1.23, decision D15): `app.run(workers=N)` and
+  `fulmen run --workers N` spawn N processes on POSIX, each binding the
+  same `host:port` with `SO_REUSEPORT` (Linux and macOS — verified). A
+  Python supervisor restarts dead workers and tears the group down after a
+  slot crashes more than 5 times in 60 s; SIGINT/SIGTERM stop the whole
+  group. `workers > 1` is refused with a clear error off POSIX.
+- `fulmen-server::serve_listener` serves on an already-bound
+  `std::net::TcpListener`, sharing the accept loop with `serve` (the
+  `SO_REUSEPORT` entry point workers use).
 - `fulmen-server`: pure-Rust HTTP/1.1 transport on tokio + hyper with a
   `Dispatcher` trait boundary (`serve`/`Server`, `ServerConfig`,
   `Request`/`Response` wire types), keep-alive and pipelining, request

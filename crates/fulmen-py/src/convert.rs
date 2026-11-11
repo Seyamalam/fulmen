@@ -106,7 +106,21 @@ pub(crate) fn call_and_convert(
     args: &[ParamArg],
     ctx: &PyCtx<'_>,
 ) -> CallOutcome {
-    match invoke(py, callable, args, ctx) {
+    settle(py, invoke(py, callable, args, ctx), callable, ctx)
+}
+
+/// Resolve an invoke result into a [`CallOutcome`]: converted returns pass
+/// through, everything else is logged and becomes [`CallOutcome::Failed`].
+/// Shared by the sync path (via [`call_and_convert`]) and the async path,
+/// which feeds it the completed task's result or exception. `callable` is
+/// the handler object, used only for log lines.
+pub(crate) fn settle(
+    py: Python<'_>,
+    result: Result<PyReturn, InvokeError>,
+    callable: &Py<PyAny>,
+    ctx: &PyCtx<'_>,
+) -> CallOutcome {
+    match result {
         Ok(PyReturn::Unsupported(ty)) => {
             log_message(
                 py,
@@ -151,13 +165,13 @@ pub(crate) fn call_and_convert(
     }
 }
 
-/// Build the argument tuple/kwargs and call the handler.
-fn invoke(
-    py: Python<'_>,
-    callable: &Py<PyAny>,
+/// Materialize `args` into the call's positional tuple and kwargs dict.
+/// Shared by the sync path (invoke → result conversion) and the async path
+/// (build the coroutine object), so both build arguments identically.
+pub(crate) fn build_args<'py>(
+    py: Python<'py>,
     args: &[ParamArg],
-    ctx: &PyCtx<'_>,
-) -> Result<PyReturn, InvokeError> {
+) -> Result<(Bound<'py, PyTuple>, Bound<'py, PyDict>), InvokeError> {
     let mut positional = Vec::with_capacity(args.len());
     let kwargs = PyDict::new(py);
     for arg in args {
@@ -174,6 +188,17 @@ fn invoke(
         }
     }
     let tuple = PyTuple::new(py, positional).map_err(InvokeError::Internal)?;
+    Ok((tuple, kwargs))
+}
+
+/// Build the argument tuple/kwargs and call the handler.
+fn invoke(
+    py: Python<'_>,
+    callable: &Py<PyAny>,
+    args: &[ParamArg],
+    ctx: &PyCtx<'_>,
+) -> Result<PyReturn, InvokeError> {
+    let (tuple, kwargs) = build_args(py, args)?;
     let result = callable
         .call(py, tuple, Some(&kwargs))
         .map_err(InvokeError::Handler)?;
@@ -181,7 +206,7 @@ fn invoke(
 }
 
 /// Convert a Python return value into [`PyReturn`].
-fn convert_result(
+pub(crate) fn convert_result(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
     ctx: &PyCtx<'_>,
@@ -330,6 +355,18 @@ pub(crate) fn internal_error() -> fulmen_server::Response {
         CT_TEXT,
         Bytes::from_static(b"Internal Server Error"),
     )
+}
+
+/// `503` + `Retry-After` for shed load (DESIGN.md §14.4): queue full, or a
+/// job that waited past its queue deadline.
+pub(crate) fn service_unavailable() -> fulmen_server::Response {
+    let mut response = internal_error();
+    response.status = StatusCode::SERVICE_UNAVAILABLE;
+    response.body = Bytes::from_static(b"Service Unavailable");
+    response
+        .headers
+        .insert(http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
 }
 
 /// A displayable type name for error messages.

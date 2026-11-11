@@ -3,7 +3,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use hyper::server::conn::http1;
@@ -78,33 +78,75 @@ impl Server {
 /// graceful shutdown unless [`ServerConfig::handle_signals`] is `false`;
 /// embedders can always call [`Server::shutdown`] themselves.
 ///
-/// The bind runs inside the new runtime and is awaited over a channel, so
-/// `serve` does not need `Runtime::block_on` and is safe to call inside or
+/// # Errors
+///
+/// Returns an error if the configuration is invalid, the bind fails, or
+/// the runtime cannot be built.
+pub fn serve<D: Dispatcher>(config: ServerConfig, dispatcher: D) -> io::Result<Server> {
+    config.validate()?;
+    let listener = std::net::TcpListener::bind(config.bind)?;
+    serve_listener(config, listener, dispatcher)
+}
+
+/// Serve on an already-bound `std::net::TcpListener` instead of binding
+/// internally — the entry point `SO_REUSEPORT` worker processes use
+/// (docs/DESIGN.md §7.2). [`serve`] delegates to it so the accept loop is
+/// shared code.
+///
+/// The listener is moved into the runtime over a channel rather than via
+/// `Runtime::block_on`, so `serve_listener` is safe to call inside or
 /// outside an async context.
 ///
 /// # Errors
 ///
-/// Returns an error if the configuration is invalid, the runtime cannot
-/// be built, or the bind fails.
-pub fn serve<D: Dispatcher>(config: ServerConfig, dispatcher: D) -> io::Result<Server> {
+/// Returns an error if the configuration is invalid, the listener is not
+/// usable, or the runtime cannot be built.
+pub fn serve_listener<D: Dispatcher>(
+    config: ServerConfig,
+    listener: std::net::TcpListener,
+    dispatcher: D,
+) -> io::Result<Server> {
     config.validate()?;
+    listener.set_nonblocking(true)?;
+    let local_addr = listener.local_addr()?;
     let runtime = Builder::new_multi_thread()
         .worker_threads(config.worker_threads)
         .thread_name("fulmen-server")
         .enable_all()
         .build()?;
 
-    // Bind inside the new runtime without `block_on`, so `serve` also
-    // works when the caller is already inside a tokio runtime.
-    let bind = config.bind;
-    let (bind_tx, bind_rx) = mpsc::channel();
-    runtime.spawn(async move {
-        let _ = bind_tx.send(TcpListener::bind(bind).await);
+    // Convert inside the new runtime without `block_on` (`from_std` needs
+    // the runtime context for the reactor registration). The handshake is
+    // `Mutex` + `Condvar`, not `std::sync::mpsc`: `mpsc::recv` parks through
+    // libdispatch on macOS, which aborts any process forked from a
+    // multi-threaded parent — exactly what `SO_REUSEPORT` workers are.
+    let bind = Arc::new((Mutex::new(None), Condvar::new()));
+    runtime.spawn({
+        let bind = Arc::clone(&bind);
+        async move {
+            *bind.0.lock().unwrap_or_else(PoisonError::into_inner) =
+                Some(TcpListener::from_std(listener));
+            bind.1.notify_one();
+        }
     });
-    let listener = bind_rx
-        .recv()
-        .map_err(|_| io::Error::other("bind task ended without a result"))??;
-    let local_addr = listener.local_addr()?;
+    let (mutex, condvar) = &*bind;
+    let mut slot = mutex.lock().unwrap_or_else(PoisonError::into_inner);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let listener = loop {
+        if let Some(result) = slot.take() {
+            break result?;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::other(
+                "listener setup task ended without a result",
+            ));
+        }
+        let (guard, _) = condvar
+            .wait_timeout(slot, remaining)
+            .unwrap_or_else(PoisonError::into_inner);
+        slot = guard;
+    };
 
     let (shutdown, rx) = watch::channel(false);
     let shared = Arc::new(Shared {

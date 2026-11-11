@@ -1,7 +1,8 @@
 """`fulmen` command-line entry point.
 
-Subcommands planned for v1 (see docs/ROADMAP.md): new, dev, run, routes,
-check, doctor, fix, gen client, gen openapi, add. `run` lands in M1.22.
+Subcommands planned for v1 (see docs/ROADMAP.md): new, dev, routes, check,
+doctor, fix, gen client, gen openapi, add. `run` (M1.22) and `info` ship
+now.
 """
 
 from __future__ import annotations
@@ -28,7 +29,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--workers",
         type=int,
         default=1,
-        help="worker processes (default: 1; only 1 is supported yet)",
+        help="worker processes (default: 1; >1 needs POSIX + SO_REUSEPORT)",
+    )
+    run.add_argument(
+        "--uvloop",
+        dest="uvloop",
+        action="store_true",
+        default=None,
+        help="require uvloop for the asyncio loop (default: auto — uvloop when installed)",
+    )
+    run.add_argument(
+        "--no-uvloop",
+        dest="uvloop",
+        action="store_false",
+        help="force plain asyncio even when uvloop is installed",
+    )
+    run.add_argument(
+        "--gil-batch-size",
+        type=int,
+        default=32,
+        help="max sync handlers run per GIL acquisition under backlog (default: 32)",
     )
     run.add_argument("--debug", action="store_true", help="reserved; no effect yet")
 
@@ -56,7 +76,14 @@ def _run(args: argparse.Namespace) -> int:
         print(f"fulmen run: {exc}", file=sys.stderr)
         return 2
     try:
-        app.run(host=args.host, port=args.port, workers=args.workers, debug=args.debug)
+        app.run(
+            host=args.host,
+            port=args.port,
+            workers=args.workers,
+            debug=args.debug,
+            uvloop=args.uvloop,
+            gil_batch_size=args.gil_batch_size,
+        )
     except StartupError as exc:
         print(exc, file=sys.stderr)
         return 1

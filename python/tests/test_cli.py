@@ -15,7 +15,31 @@ def test_cli_run_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
     called: dict[str, object] = {}
     monkeypatch.setattr(Fulmen, "run", lambda self, **kwargs: called.update(kwargs))
     assert main(["run", "sample_app:app", "--port", "9876", "--workers", "3"]) == 0
-    assert called == {"host": "127.0.0.1", "port": 9876, "workers": 3, "debug": False}
+    assert called == {
+        "host": "127.0.0.1",
+        "port": 9876,
+        "workers": 3,
+        "debug": False,
+        "uvloop": None,
+        "gil_batch_size": 32,
+    }
+
+
+def test_cli_run_uvloop_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, object] = {}
+    monkeypatch.setattr(Fulmen, "run", lambda self, **kwargs: called.update(kwargs))
+    assert main(["run", "sample_app:app", "--uvloop"]) == 0
+    assert called["uvloop"] is True
+    called.clear()
+    assert main(["run", "sample_app:app", "--no-uvloop"]) == 0
+    assert called["uvloop"] is False
+
+
+def test_cli_run_batch_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, object] = {}
+    monkeypatch.setattr(Fulmen, "run", lambda self, **kwargs: called.update(kwargs))
+    assert main(["run", "sample_app:app", "--gil-batch-size", "8"]) == 0
+    assert called["gil_batch_size"] == 8
 
 
 def test_cli_run_missing_colon(capsys: pytest.CaptureFixture[str]) -> None:

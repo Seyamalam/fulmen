@@ -368,19 +368,30 @@ process (one per worker on GIL builds; one total on free-threaded builds)
 │     accept, parse, route, native middleware, validation, encoding
 ├── sync pool: M OS threads (default = 4 × cores on GIL builds, 2 × cores free-threaded)
 │     runs `def` handlers
-└── asyncio loop thread(s): K (default 1 on GIL builds, = cores free-threaded)
+└── asyncio loop thread: 1 per app, only when `async def` routes exist
       runs `async def` handlers and Python async hooks
 ```
 
 ### 7.2 Workers
 
-- **GIL builds:** `fulmen run --workers N` forks N worker processes. On Linux
-  each binds the port with `SO_REUSEPORT`, so the kernel balances connections.
-  On macOS and Windows a supervisor accepts and passes sockets to workers.
+- **POSIX (Linux + macOS):** `fulmen run --workers N` / `app.run(workers=N)`
+  forks N worker processes; each binds the same `host:port` with
+  `SO_REUSEPORT`, so the kernel balances connections between processes
+  (decision D15, resolving Q6). Verified on macOS: two workers bound and
+  served the same port — no acceptor process or socket passing is needed.
+- **Windows:** `workers > 1` is refused with a clear `StartupError`; v1
+  stays single-process there (no `fork`, no `SO_REUSEPORT`).
+- The supervisor lives in Python (`fulmen.workers`), not Rust: it restarts
+  a worker that dies, and tears the whole group down with `StartupError`
+  after a slot crashes more than 5 times within 60 s
+  ([§14.6](#146-process-supervision)). `app.run` and `fulmen run` pass
+  identical options into the same supervisor.
+- Workers must be spawned before the parent process has served: a child
+  forked from a multi-threaded parent must never park a thread through
+  libdispatch (macOS aborts it with `SIGTRAP`), so every cross-thread wait
+  in the bridge uses `Mutex` + `Condvar`, never `std::sync::mpsc`.
 - **Free-threaded builds:** default is one process. Python code runs in
   parallel across threads, so there is no need to copy the app N times.
-- A supervisor process restarts crashed workers, with exponential backoff
-  after repeated crashes ([§14.6](#146-process-supervision)).
 
 ### 7.3 Sync handlers
 
@@ -391,21 +402,56 @@ connection never blocks; it awaits a oneshot channel.
 
 ### 7.4 Async handlers
 
-Each loop thread runs a standard asyncio loop (uvloop when installed and
-enabled). Rust submits a coroutine with `loop.call_soon_threadsafe` and
-attaches a done-callback that completes a tokio oneshot. Staying on real
-asyncio means httpx, asyncpg, redis-py, aiobotocore and the rest work
-unchanged.
+One dedicated OS thread per compiled app runs a real asyncio loop (uvloop
+when installed and enabled; the `uvloop` option is tri-state: `None` auto,
+`False` plain asyncio, `True` required — M1.16). The loop thread exists
+only when the app declares `async def` handlers; the loop is built in
+exactly one place so loop policy can flip later.
+
+Dispatch materializes the handler's arguments first — the same
+`build_args` helper as the sync path — then submits a job onto a bounded
+queue (1 024 deep, 5 s queue deadline; §14.4). When the queue goes from
+empty to non-empty the submitter takes the GIL once for
+`loop.call_soon_threadsafe(pump)`; under load the pump is already running
+and later submits skip the wake entirely. The pump drains at most 64 jobs
+per pass into `loop.create_task` and reschedules itself while work
+remains, so the loop always iterates (an unbounded drain would wedge the
+loop under sustained submit pressure). Each task's done-callback converts
+the result with the same machinery as the sync path before completing the
+job's `tokio::sync::oneshot` — the dispatch future awaits it without ever
+touching Python. A full queue or an overdue job answers `503` +
+`Retry-After`; a dead loop answers `500`. The tokio thread that owns the
+connection never blocks and never touches Python.
+
+Lock discipline, for anyone editing the bridge: no Python call may run
+while a bridge mutex is held — `call_soon_threadsafe` can release the GIL
+inside its self-pipe `send`, so a submitter holding a mutex across it can
+deadlock against a second submitter that attaches first (observed: a
+wedge where the loop starved for the GIL while a `fulmen-server` worker
+held the GIL and waited on the runtime mutex). Extract what a call needs
+under the lock (`clone_ref` is refcount-only and safe), drop the guard,
+then call.
+
+Staying on real asyncio means httpx, asyncpg, redis-py, aiobotocore and the
+rest work unchanged.
 
 Rejected alternative: polling coroutines directly from Rust. It is faster in
 microbenchmarks but breaks every library that expects an asyncio loop.
 
 ### 7.5 GIL batching
 
-On GIL builds, when several requests are ready for Python at the same time,
-the dispatcher hands them over in one GIL acquisition (up to a batch limit,
-default 32, and a time budget, default 200 µs). This amortizes the cost of
-taking the GIL under load. On free-threaded builds batching is off.
+On GIL builds, when more handlers are queued than the pool can run in
+parallel, a worker gathers up to `gil_batch_size` jobs of that surplus and
+runs them under ONE GIL acquisition (default 32, `gil_batch_size` on
+`app.run`/`serve`/CLI). This amortizes the cost of taking the GIL under
+real backlog. The surplus test is `queued > workers - 1`: at or below one
+queued job per sibling the batch is a singleton, so a concurrent burst
+always spreads across the pool — an earlier design that compared against
+only *parked* workers let one worker hoard the queue under saturation and
+measured ~2× slower than no batching (80k vs 159k req/s). Assembly never
+waits for stragglers; a collection-time budget would only add latency to
+the job already in hand. On free-threaded builds batching is off
+(`gil_batch_size` ignored).
 
 ### 7.6 Backpressure
 
@@ -1231,6 +1277,7 @@ measured reason.
 | D12 | Error format | RFC 9457 problem details | custom | Standard, supported by client tooling. |
 | D13 | CI/CD | Local (`just`, git hooks) | GitHub Actions | Maintainer preference; one machine, reproducible pinned toolchain. |
 | D14 | License | Apache-2.0 + trademark policy | MIT, AGPL-3.0 | Patent grant, attribution via NOTICE, name protection; permissive enough for adoption. |
+| D15 | Multi-process workers (Q6) | `SO_REUSEPORT` on all POSIX (Linux + macOS); Python supervisor; Windows refuses `workers > 1` | acceptor process with socket passing, single process everywhere, prefork on Linux only | `SO_REUSEPORT` works on macOS exactly like Linux (verified: two workers shared one port), so no acceptor layer is needed at all; Windows has neither `fork` nor `SO_REUSEPORT`, so v1 stays single-process there rather than shipping a second worker model. |
 
 ## 29. Open questions
 
@@ -1240,11 +1287,11 @@ and removed from here.
 | # | Question | Decide in |
 | --- | --- | --- |
 | Q1 | One asyncio loop per process vs per thread on free-threaded builds | M1 (benchmark) |
-| Q2 | GIL batch size and time budget defaults | M1 (benchmark) |
+| Q2 | GIL batch size default (32) | M1 (benchmark) |
 | Q3 | JSON engine: `sonic-rs`, `serde_json` + custom visitor, or own parser | M2 (benchmark) |
 | Q4 | 404 vs 422 for path parameters that fail type checks | M2 |
 | Q5 | Whether `Model` instances are mutable by default | M2 |
-| Q6 | Worker model on macOS/Windows (socket passing vs single process) | M1 |
+| Q6 | ~~Worker model on macOS/Windows (socket passing vs single process)~~ — decided: `SO_REUSEPORT` on macOS too; Windows single-process (D15, §7.2) | ~~M1~~ done |
 | Q7 | Offer an ASGI adapter after 1.0 for ecosystem compatibility | after M6 |
 | Q8 | Project site domain (`fulmen.dev` is assumed in docs) | M6 |
 

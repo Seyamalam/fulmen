@@ -38,6 +38,9 @@ hyper = { version = "1.7", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 bytes = "1.10"
 http-body-util = "0.1"
+# SO_REUSEPORT socket setup for multi-process workers (§7.2); unix-only
+# use, declared for fulmen-py which is dep-exempt.
+socket2 = "=0.6.2"
 
 # Guardrails. `just ci` runs clippy with `-D warnings`, so every "warn" here
 # blocks a merge. To opt out locally, use `#[expect(lint, reason = "...")]`;

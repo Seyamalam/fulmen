@@ -14,11 +14,12 @@ use std::time::Instant;
 use bytes::Bytes;
 use fulmen_core::{CompiledApp, PathValue, RouteLookup};
 use fulmen_server::{DispatchFuture, Dispatcher, Request, Response};
-use http::header::{ALLOW, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, RETRY_AFTER};
+use http::header::{ALLOW, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 use http::{HeaderValue, Method, StatusCode};
 use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
+use crate::aloop::{AsyncLoop, AsyncSubmitError};
 use crate::convert::{self, ParamArg, ParamValue};
 use crate::pool::{SubmitError, SyncJob, SyncPool};
 
@@ -31,10 +32,9 @@ pub(crate) enum HandlerKind {
     /// `def` — runs on the sync pool. `kw_flags` marks, per parameter in
     /// handler signature order, which are keyword-only (passed by name).
     Sync { kw_flags: Box<[bool]> },
-    /// `async def` — reserved for the asyncio dispatch path (M1.15). For
-    /// now requests to such routes answer `500`, logged, at dispatch time;
-    /// see [`dispatch_async`].
-    Async,
+    /// `async def` — runs as a task on the asyncio loop thread (§7.4).
+    /// `kw_flags` has the same meaning as for `Sync`.
+    Async { kw_flags: Box<[bool]> },
 }
 
 /// One entry in the handler table, indexed by `RouteInfo::handler_index`.
@@ -58,6 +58,8 @@ pub(crate) struct AppInner {
     pub(crate) logger: Arc<Py<PyAny>>,
     /// The bounded sync-handler pool.
     pub(crate) pool: SyncPool,
+    /// The asyncio loop thread; `Some` only when the app has async routes.
+    pub(crate) async_loop: Option<AsyncLoop>,
 }
 
 /// The `Dispatcher` handed to `fulmen_server::serve`.
@@ -131,7 +133,7 @@ impl AppInner {
 
         let mut response = match &entry.kind {
             HandlerKind::Sync { .. } => self.dispatch_sync(entry, args, method, path).await,
-            HandlerKind::Async => self.dispatch_async(entry, args, method, path).await,
+            HandlerKind::Async { .. } => self.dispatch_async(entry, args, method, path).await,
         };
 
         if implicit_head {
@@ -218,16 +220,13 @@ impl AppInner {
         let HandlerKind::Sync { kw_flags } = &entry.kind else {
             return convert::internal_error();
         };
-        if kw_flags.len() != args.len() {
+        let mut args = Vec::from(args);
+        if !apply_kw_flags(&mut args, kw_flags) {
             log_message(
                 &self.logger,
                 format!("{method} {path}: parameter spec does not match the signature"),
             );
             return convert::internal_error();
-        }
-        let mut args = Vec::from(args);
-        for (arg, kw) in args.iter_mut().zip(kw_flags.iter()) {
-            arg.keyword_only = *kw;
         }
         let (tx, rx) = oneshot::channel();
         let job = SyncJob {
@@ -239,39 +238,62 @@ impl AppInner {
         };
         match self.pool.try_submit(job) {
             Ok(()) => rx.await.unwrap_or_else(|_| convert::internal_error()),
-            Err(SubmitError::Full) => {
-                let mut response = Response::status(StatusCode::SERVICE_UNAVAILABLE);
-                response.headers.insert(CONTENT_TYPE, CT_TEXT);
-                response
-                    .headers
-                    .insert(RETRY_AFTER, HeaderValue::from_static("1"));
-                response.body = Bytes::from_static(b"Service Unavailable");
-                response
-            }
+            Err(SubmitError::Full) => convert::service_unavailable(),
         }
     }
 
-    /// The `async def` dispatch seam (M1.15): a loop thread running
-    /// `loop.call_soon_threadsafe` + a completion oneshot lands here. Until
-    /// that exists, an async route answers `500` and logs at dispatch time —
-    /// startup stays possible so sync-only apps are unaffected.
-    #[expect(
-        clippy::unused_async,
-        reason = "the M1.15 asyncio bridge lands here and awaits a completion channel"
-    )]
+    /// Submit the coroutine to the asyncio loop thread and await the
+    /// completion oneshot (§7.4, D4). The bridge answers `503` on a full
+    /// queue and `500` when the loop is gone.
     async fn dispatch_async(
         &self,
-        _entry: &HandlerEntry,
-        _args: Box<[ParamArg]>,
+        entry: &HandlerEntry,
+        args: Box<[ParamArg]>,
         method: Method,
         path: String,
     ) -> Response {
-        log_message(
-            &self.logger,
-            format!("{method} {path}: async handlers are not supported yet"),
-        );
-        convert::internal_error()
+        let HandlerKind::Async { kw_flags } = &entry.kind else {
+            return convert::internal_error();
+        };
+        let mut args = Vec::from(args);
+        if !apply_kw_flags(&mut args, kw_flags) {
+            log_message(
+                &self.logger,
+                format!("{method} {path}: parameter spec does not match the signature"),
+            );
+            return convert::internal_error();
+        }
+        let Some(loop_thread) = &self.async_loop else {
+            log_message(
+                &self.logger,
+                format!("{method} {path}: async handler has no loop thread"),
+            );
+            return convert::internal_error();
+        };
+        let (tx, rx) = oneshot::channel();
+        match loop_thread.submit(
+            Arc::clone(&entry.callable),
+            args.into_boxed_slice(),
+            format!("{method} {path}").into_boxed_str(),
+            tx,
+        ) {
+            Ok(()) => rx.await.unwrap_or_else(|_| convert::internal_error()),
+            Err(AsyncSubmitError::Full) => convert::service_unavailable(),
+            Err(AsyncSubmitError::Unavailable) => convert::internal_error(),
+        }
     }
+}
+
+/// Apply `kw_flags` to the call arguments (signature order). `false` when
+/// the counts disagree — a bridge bug, not a user error.
+fn apply_kw_flags(args: &mut [ParamArg], kw_flags: &[bool]) -> bool {
+    if args.len() != kw_flags.len() {
+        return false;
+    }
+    for (arg, kw) in args.iter_mut().zip(kw_flags.iter()) {
+        arg.keyword_only = *kw;
+    }
+    true
 }
 
 /// Log a message through the `fulmen` logger; attaches briefly and stays
