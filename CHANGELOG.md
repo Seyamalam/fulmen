@@ -10,6 +10,12 @@ exists. Move the `Unreleased` entries under the new version heading first.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-11
+
+Milestone M1 — "fast core". First release: a real server answering requests
+from Python handlers, with benchmark numbers proving the speed thesis.
+Details in `docs/ROADMAP.md` §M1 and `benches/results/0.1.0.md`.
+
 ### Added
 
 - Python bridge (`fulmen-py`) and public API: `Fulmen` app with
