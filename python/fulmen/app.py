@@ -82,13 +82,48 @@ class Fulmen:
         port: int = 8000,
         workers: int = 1,
         debug: bool = False,
+        *,
+        uvloop: bool | None = None,
+        gil_batch_size: int = 32,
     ) -> None:
         """Compile the declarations and serve until the process is signalled.
 
-        `workers > 1` is accepted for forward compatibility; multi-process
-        serving is not implemented yet and a single process runs.
+        `workers > 1` forks worker processes that share `host:port` with
+        `SO_REUSEPORT` on Linux and macOS; other platforms refuse it and
+        stay single-process (DESIGN.md §7.2, decision D15).
+
+        `uvloop` selects the event loop for `async def` handlers (§7.4):
+        `None` uses uvloop when the package is installed, `False` forces
+        plain asyncio, `True` requires uvloop and fails startup without it.
+
+        `gil_batch_size` tunes the sync pool's GIL batching (§7.5): when
+        more handlers are queued than the pool can run in parallel, up to
+        `gil_batch_size` of the surplus run under one GIL acquisition.
+        No-op on free-threaded builds.
         """
-        _serve(self._compile_native(), host, port, workers, debug)
+        if workers < 1:
+            raise ValueError(f"workers must be >= 1, got {workers}")
+        if workers > 1:
+            from fulmen.workers import run_workers
+
+            run_workers(
+                self,
+                host=host,
+                port=port,
+                workers=workers,
+                debug=debug,
+                uvloop=uvloop,
+                gil_batch_size=gil_batch_size,
+            )
+            return
+        _serve(
+            self._compile_native(),
+            host,
+            port,
+            debug=debug,
+            uvloop=uvloop,
+            gil_batch_size=gil_batch_size,
+        )
 
     def _compile_native(self) -> NativeApp:
         """Inspect every recorded handler and build the native declaration.

@@ -12,12 +12,12 @@ from fulmen._fulmen import TestServer, serve_for_test
 
 
 @pytest.fixture
-def serve() -> Iterator[Callable[[Fulmen], str]]:
+def serve() -> Iterator[Callable[..., str]]:
     """Serve a `Fulmen` app on an ephemeral port; yield a `app -> base-url` factory."""
     servers: list[TestServer] = []
 
-    def factory(app: Fulmen) -> str:
-        server = serve_for_test(app._compile_native())
+    def factory(app: Fulmen, uvloop: bool | None = None) -> str:
+        server = serve_for_test(app._compile_native(), uvloop=uvloop)
         servers.append(server)
         return f"http://{server.addr()}"
 

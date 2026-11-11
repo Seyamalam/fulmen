@@ -81,19 +81,31 @@ built on it.
 
 - [x] M1.13 `Fulmen` class and route decorators (Python), declarations passed to Rust
 - [x] M1.14 Sync dispatch: thread pool, `Python::attach` only around the call
-- [ ] M1.15 Async dispatch: asyncio loop thread, `call_soon_threadsafe`, oneshot completion
-      (seam in place: `async def` handlers compile as `HandlerKind::Async`
-      and dispatch through `dispatch_async`, which currently logs and
-      answers 500)
-- [ ] M1.16 Optional uvloop
-- [ ] M1.17 GIL batching on GIL builds (batch size and budget configurable)
-- [ ] M1.18 Free-threaded build: verified parallel sync handlers, no GIL re-enable
+- [x] M1.15 Async dispatch: asyncio loop thread, `call_soon_threadsafe`, oneshot completion
+      (`aloop.rs`: one `fulmen-asyncio` thread per app with async routes,
+      bounded 1024-job queue, empty→non-empty CST wake, pump drains into
+      `loop.create_task`, done-callback settles a tokio oneshot; 503 on
+      full/overdue, 500 on dead loop)
+- [x] M1.16 Optional uvloop
+      (tri-state `uvloop`: `None` auto, `False` forced asyncio, `True`
+      required or `StartupError`; `app.run(uvloop=...)`, `serve`,
+      `serve_for_test`, CLI `--uvloop`/`--no-uvloop`)
+- [x] M1.17 GIL batching on GIL builds (batch size and budget configurable)
+      (`gil_batch_size`/`gil_batch_budget_us` on `app.run`/`serve`/CLI;
+      batches never take jobs parked siblings could absorb)
+- [x] M1.18 Free-threaded build: verified parallel sync handlers, no GIL re-enable
+      (`test_freethreaded.py`: `sys._is_gil_enabled()` stays `False`,
+      barrier rendezvous proves overlapping handlers; 3.14t leg of
+      `just test-matrix`)
 - [x] M1.19 Return conversion: `str`, `bytes`, `dict`/`list` → JSON, `Response`
 - [x] M1.20 Unhandled exceptions → 500, traceback in logs only
 - [x] M1.21 Rust panics caught at the dispatch boundary → 500
 - [x] M1.22 `app.run(host, port, workers)` and `fulmen run module:app`
       (`workers > 1` is accepted but runs a single process until M1.23)
-- [ ] M1.23 Multi-process workers with `SO_REUSEPORT` (Linux); decide Q6 for macOS/Windows
+- [x] M1.23 Multi-process workers with `SO_REUSEPORT` (Linux); decide Q6 for macOS/Windows
+      (Q6→D15: `SO_REUSEPORT` on all POSIX incl. macOS — verified; Python
+      supervisor with bounded crash-loop restart; Windows refuses
+      `workers > 1` clearly)
 
 ### Benchmarks
 

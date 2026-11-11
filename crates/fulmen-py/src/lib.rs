@@ -3,10 +3,11 @@
 //! benchmarked without an interpreter.
 //!
 //! Layout: [`json`] converts Python values to a serializable tree, [`pool`]
-//! is the bounded sync-handler thread pool, [`convert`] calls handlers and
-//! maps their return values to wire responses, [`dispatch`] owns the HTTP
-//! semantics over the compiled route table, [`app`] records and compiles
-//! declarations, and [`serve`] exposes the two entry points
+//! is the bounded sync-handler thread pool, [`aloop`] is the asyncio
+//! loop-thread bridge for `async def` handlers, [`convert`] calls handlers
+//! and maps their return values to wire responses, [`dispatch`] owns the
+//! HTTP semantics over the compiled route table, [`app`] records and
+//! compiles declarations, and [`serve`] exposes the two entry points
 //! (`serve`/`serve_for_test`).
 
 // mimalloc is the global allocator of the extension module (DESIGN.md
@@ -18,6 +19,7 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use pyo3::prelude::*;
 
+mod aloop;
 mod app;
 mod convert;
 mod dispatch;

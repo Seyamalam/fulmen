@@ -348,9 +348,37 @@ def test_run_calls_native_serve(monkeypatch: pytest.MonkeyPatch) -> None:
     called: dict[str, object] = {}
     monkeypatch.setattr(
         "fulmen.app._serve",
-        lambda native, host, port, workers, debug: called.update(
-            host=host, port=port, workers=workers, debug=debug
-        ),
+        lambda native, host, port, **kwargs: called.update(host=host, port=port, **kwargs),
     )
-    app.run(host="127.0.0.1", port=9000, workers=2, debug=True)
-    assert called == {"host": "127.0.0.1", "port": 9000, "workers": 2, "debug": True}
+    app.run(host="127.0.0.1", port=9000, workers=1, debug=True, uvloop=False)
+    assert called == {
+        "host": "127.0.0.1",
+        "port": 9000,
+        "debug": True,
+        "uvloop": False,
+        "gil_batch_size": 32,
+    }
+
+
+def test_run_workers_dispatches_to_supervisor(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = Fulmen()
+    called: dict[str, object] = {}
+    monkeypatch.setattr(
+        "fulmen.workers.run_workers",
+        lambda app, **kwargs: called.update(kwargs),
+    )
+    app.run(host="127.0.0.1", port=9000, workers=4, uvloop=True, gil_batch_size=8)
+    assert called == {
+        "host": "127.0.0.1",
+        "port": 9000,
+        "workers": 4,
+        "debug": False,
+        "uvloop": True,
+        "gil_batch_size": 8,
+    }
+
+
+def test_run_workers_rejects_zero() -> None:
+    app = Fulmen()
+    with pytest.raises(ValueError, match="workers must be >= 1"):
+        app.run(workers=0)

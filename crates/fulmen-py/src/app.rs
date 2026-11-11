@@ -10,6 +10,7 @@ use fulmen_core::{AppDecl, CompiledApp, Method, RouteDecl};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
+use crate::aloop::{self, AsyncLoop};
 use crate::dispatch::{AppInner, HandlerEntry, HandlerKind, PyDispatcher};
 use crate::pool::SyncPool;
 
@@ -104,6 +105,26 @@ pub(crate) struct CompiledServe {
     pub(crate) inner: Arc<AppInner>,
 }
 
+/// Knobs the serving entry points collect from the Python call and hand to
+/// [`compile_app`].
+pub(crate) struct BridgeConfig {
+    /// uvloop tri-state: `None` auto, `Some(true)` required, `Some(false)`
+    /// plain asyncio (§7.4, M1.16).
+    pub(crate) uvloop: Option<bool>,
+    /// GIL batching size for the sync pool (§7.5); ignored on free-threaded
+    /// builds, where batching never pays.
+    pub(crate) gil_batch_size: usize,
+}
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            uvloop: None,
+            gil_batch_size: 32,
+        }
+    }
+}
+
 /// Compile `native`'s recorded declarations into [`CompiledServe`].
 ///
 /// Python-side declaration problems (a handler parameter that is not a path
@@ -113,13 +134,18 @@ pub(crate) struct CompiledServe {
 ///
 /// # Errors
 /// [`StartupError`] listing every problem found.
-pub(crate) fn compile_app(py: Python<'_>, native: &NativeApp) -> PyResult<CompiledServe> {
+pub(crate) fn compile_app(
+    py: Python<'_>,
+    native: &NativeApp,
+    config: &BridgeConfig,
+) -> PyResult<CompiledServe> {
     let response_cls = import_response_cls(py)?;
     let logger = import_logger(py)?;
 
     let mut decls = AppDecl::new();
     let mut entries: Vec<HandlerEntry> = Vec::with_capacity(native.routes.len());
     let mut problems: Vec<String> = Vec::new();
+    let mut has_async = false;
 
     for registration in &native.routes {
         let label = format!("{} {}", registration.method, registration.path);
@@ -129,6 +155,7 @@ pub(crate) fn compile_app(py: Python<'_>, native: &NativeApp) -> PyResult<Compil
         let Some(kind) = check_params(py, registration, &label, &mut problems) else {
             continue;
         };
+        has_async |= matches!(kind, HandlerKind::Async { .. });
 
         let mut decl = RouteDecl::new(method, &registration.path, index_to_u32(entries.len()));
         for (name, ty) in &registration.param_types {
@@ -151,16 +178,37 @@ pub(crate) fn compile_app(py: Python<'_>, native: &NativeApp) -> PyResult<Compil
     }
 
     // §7.3: pool size defaults to 4× cores under the GIL, 2× free-threaded;
-    // the queue is bounded at 1024 with a 10 s queue deadline (§14.4).
+    // the queue is bounded at 1024 with a 5 s queue deadline (§14.4).
     let threads = default_pool_threads(py);
+    let gil = gil_enabled(py);
+    // §7.5: GIL batching only pays when the GIL exists; free-threaded
+    // builds take one job at a time.
+    let batch_size = if gil { config.gil_batch_size } else { 1 };
     let pool = SyncPool::new(
         threads,
         1024,
-        Duration::from_secs(10),
+        Duration::from_secs(5),
+        batch_size,
         logger.clone(),
         response_cls.clone(),
     )
     .map_err(|err| StartupError::new_err(format!("failed to spawn the sync pool: {err}")))?;
+
+    // §7.4: the asyncio loop thread only exists when the app declares
+    // `async def` handlers.
+    let async_loop = if has_async {
+        let loop_impl = aloop::resolve_loop_impl(py, config.uvloop)?;
+        Some(AsyncLoop::start(
+            py,
+            loop_impl,
+            1024,
+            Duration::from_secs(5),
+            logger.clone(),
+            response_cls.clone(),
+        )?)
+    } else {
+        None
+    };
 
     Ok(CompiledServe {
         inner: Arc::new(AppInner {
@@ -168,6 +216,7 @@ pub(crate) fn compile_app(py: Python<'_>, native: &NativeApp) -> PyResult<Compil
             handlers: entries,
             logger,
             pool,
+            async_loop,
         }),
     })
 }
@@ -236,7 +285,9 @@ fn check_params(
         return None;
     }
     if registration.is_async {
-        Some(HandlerKind::Async)
+        Some(HandlerKind::Async {
+            kw_flags: registration.kw_flags.clone().into_boxed_slice(),
+        })
     } else {
         Some(HandlerKind::Sync {
             kw_flags: registration.kw_flags.clone().into_boxed_slice(),

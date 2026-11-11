@@ -31,6 +31,13 @@ class NativeApp:
         ],
     ) -> None: ...
 
+class AsyncPump:
+    """The asyncio bridge's loop callback (internal, not importable).
+
+    Lives on the loop thread: `__call__` drains the job queue into
+    `loop.create_task` and `complete` is each task's done-callback. It is
+    never registered on the module or constructed from Python."""
+
 class TestServer:
     """A running server bound to an ephemeral port (tests only).
 
@@ -51,15 +58,28 @@ def serve(
     app: NativeApp,
     host: str,
     port: int,
-    workers: int = 1,
+    *,
     debug: bool = False,
+    uvloop: bool | None = None,
+    gil_batch_size: int = 32,
+    reuse_port: bool = False,
 ) -> None:
     """Compile `app` and serve until the process is signalled.
+
+    `uvloop`: `None` uses uvloop when installed, `False` forces plain
+    asyncio, `True` requires uvloop. `gil_batch_size` tunes the sync
+    pool's GIL batching. `reuse_port` binds with
+    `SO_REUSEPORT` for multi-process workers (POSIX only).
 
     Raises `StartupError` for declaration problems, `ValueError` for an
     invalid host, `OSError` when the bind or the server fails."""
 
-def serve_for_test(app: NativeApp, host: str = "127.0.0.1") -> TestServer:
+def serve_for_test(
+    app: NativeApp,
+    host: str = "127.0.0.1",
+    uvloop: bool | None = None,
+) -> TestServer:
     """Compile `app` and serve it on an ephemeral port for tests.
 
+    `uvloop` selects the asyncio loop implementation exactly like `serve`.
     Raises the same errors as `serve`."""

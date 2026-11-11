@@ -49,7 +49,7 @@ mod wire;
 
 pub use config::ServerConfig;
 pub use dispatcher::{DispatchFuture, Dispatcher};
-pub use server::{Server, serve};
+pub use server::{Server, serve, serve_listener};
 pub use wire::{Request, Response};
 
 /// Component name, reported by `fulmen._fulmen.native_components()`.
