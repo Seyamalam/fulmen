@@ -97,7 +97,7 @@ built on it.
 
 ### Benchmarks
 
-- [ ] M1.24 `benches/micro`: criterion for router and response writing
+- [x] M1.24 `benches/micro`: criterion for router and response writing
 - [ ] M1.25 `benches/e2e`: `oha` scenarios, comparison apps for FastAPI, Litestar, Robyn, Flask
 - [ ] M1.26 `just bench` and `just bench-check` with `benches/baseline.json` and the 5% rule
 - [ ] M1.27 Benchmark the pure-Rust dispatcher (ceiling) vs Python sync vs Python async

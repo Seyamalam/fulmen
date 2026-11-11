@@ -1,0 +1,25 @@
+[package]
+name = "fulmen-bench"
+description = "Criterion micro-benchmarks for Fulmen (router, compile, dispatch)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+fulmen-core.workspace = true
+fulmen-server.workspace = true
+criterion.workspace = true
+http.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+
+[[bench]]
+name = "micro"
+harness = false
+
+[lints]
+workspace = true

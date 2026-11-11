@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "benches/micro"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +22,8 @@ matchit = "0.9.2"
 http = "1.5.0"
 # Allocator for the extension module (DESIGN.md §25.2, ROADMAP M1.6).
 mimalloc = "0.1"
+# Micro-benchmarks (DESIGN.md §25.3, ROADMAP M1.24), used by benches/micro only.
+criterion = "0.8.2"
 
 # HTTP transport stack for fulmen-server (DESIGN.md decision D2).
 tokio = { version = "1.48", features = [
