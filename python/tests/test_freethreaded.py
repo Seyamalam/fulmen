@@ -10,6 +10,7 @@ pass on regular builds — the suite runs them on every interpreter; the
 from __future__ import annotations
 
 import sys
+import sysconfig
 import threading
 from collections.abc import Callable
 
@@ -23,10 +24,9 @@ Serve = Callable[..., str]
 def test_import_does_not_enable_the_gil() -> None:
     """`fulmen` already imported by the suite must not have re-enabled the
     GIL on a free-threaded interpreter."""
-    is_gil_enabled = getattr(sys, "_is_gil_enabled", None)
-    if is_gil_enabled is None:
-        pytest.skip("interpreter predates the free-threaded build")
-    assert is_gil_enabled() is False
+    if not sysconfig.get_config_var("Py_GIL_DISABLED"):
+        pytest.skip("GIL build; the check only means anything free-threaded")
+    assert sys._is_gil_enabled() is False
 
 
 def test_blocking_handlers_overlap(serve: Serve) -> None:
