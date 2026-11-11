@@ -70,3 +70,9 @@ docs/_build/
 
 # Pyenv
 .python-version
+
+# Benchmark artifacts: the per-run JSON files churn on every bench pass.
+# results/latest.json stays tracked — it is the run `just bench-check`
+# compares against benches/baseline.json.
+benches/e2e/results/*
+!benches/e2e/results/latest.json

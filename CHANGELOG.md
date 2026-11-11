@@ -50,6 +50,14 @@ exists. Move the `Unreleased` entries under the new version heading first.
   Python supervisor restarts dead workers and tears the group down after a
   slot crashes more than 5 times in 60 s; SIGINT/SIGTERM stop the whole
   group. `workers > 1` is refused with a clear error off POSIX.
+- Benchmark suite (M1.24–M1.29): `benches/e2e/run.py` drives `oha` against
+  seven apps (FastAPI+uvicorn, Litestar+uvicorn, Robyn, Flask+gunicorn,
+  Fulmen sync `def`, Fulmen `async def`, and a pure-Rust `ceiling-server`
+  binary in `benches/micro`) over plaintext/JSON/path-param scenarios;
+  `just bench` produces `benches/baseline.json`, `just bench-check`
+  enforces the 5% regression rule against it and joins `just ci` once a
+  baseline exists. First results and decisions in
+  `benches/results/0.1.0.md` and DESIGN.md D16/D17.
 - `fulmen-server::serve_listener` serves on an already-bound
   `std::net::TcpListener`, sharing the accept loop with `serve` (the
   `SO_REUSEPORT` entry point workers use).

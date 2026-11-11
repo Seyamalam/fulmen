@@ -1,0 +1,259 @@
+{
+  "metadata": {
+    "date": "2026-11-11 15:16:17 +0600",
+    "hardware": "Apple M5 Pro, 18 cores",
+    "os": "Darwin 25.6.0 (Darwin Kernel Version 25.6.0: Fri Jul 31 19:19:08 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6050)",
+    "python": "3.14.7",
+    "oha": "1.16.0",
+    "rustc": "1.96.0 (ac68faa20 2026-05-25)",
+    "versions": {
+      "fastapi": "0.162.4",
+      "uvicorn": "0.54.0",
+      "litestar": "2.25.0",
+      "robyn": "0.88.0",
+      "flask": "3.1.3",
+      "gunicorn": "27.0.0",
+      "uvloop": "0.22.1",
+      "fulmen": "0.1.0"
+    },
+    "workers": 12,
+    "connections": 100,
+    "duration_s": 10.0,
+    "warmup_s": 3.0,
+    "command": "per-app runs merged into one document: python benches/e2e/run.py --apps <app> --workers 12 --duration 10 --connections 100 --warmup 3 (all seven apps measured within the same 9-minute window, 2026-11-11 15:16-15:24 +0600; full-matrix passes 2-3 discarded due to ambient load)"
+  },
+  "results": {
+    "fastapi": {
+      "plaintext": {
+        "requests_per_sec": 68383.16326934464,
+        "p50_ms": 1.400666,
+        "p99_ms": 2.7178329999999997,
+        "requests": 684022,
+        "status_codes": {
+          "200": 684022
+        },
+        "errors": {}
+      },
+      "json": {
+        "requests_per_sec": 42689.85435751369,
+        "p50_ms": 2.262709,
+        "p99_ms": 4.155833,
+        "requests": 427045,
+        "status_codes": {
+          "200": 427045
+        },
+        "errors": {}
+      },
+      "item": {
+        "requests_per_sec": 40951.8061996697,
+        "p50_ms": 2.356083,
+        "p99_ms": 4.479792,
+        "requests": 409634,
+        "status_codes": {
+          "200": 409634
+        },
+        "errors": {}
+      }
+    },
+    "litestar": {
+      "plaintext": {
+        "requests_per_sec": 137955.8523790427,
+        "p50_ms": 0.712542,
+        "p99_ms": 1.057167,
+        "requests": 1380193,
+        "status_codes": {
+          "200": 1380193
+        },
+        "errors": {}
+      },
+      "json": {
+        "requests_per_sec": 137188.92902307952,
+        "p50_ms": 0.708166,
+        "p99_ms": 1.288125,
+        "requests": 1372199,
+        "status_codes": {
+          "200": 1372199
+        },
+        "errors": {}
+      },
+      "item": {
+        "requests_per_sec": 135915.63343804915,
+        "p50_ms": 0.714791,
+        "p99_ms": 1.380833,
+        "requests": 1359475,
+        "status_codes": {
+          "200": 1359475
+        },
+        "errors": {}
+      }
+    },
+    "robyn": {
+      "plaintext": {
+        "requests_per_sec": 127414.13987555433,
+        "p50_ms": 0.780625,
+        "p99_ms": 0.9560000000000001,
+        "requests": 1274746,
+        "status_codes": {
+          "200": 1274746
+        },
+        "errors": {}
+      },
+      "json": {
+        "requests_per_sec": 122206.15915403435,
+        "p50_ms": 0.815958,
+        "p99_ms": 0.9610000000000001,
+        "requests": 1222498,
+        "status_codes": {
+          "200": 1222498
+        },
+        "errors": {}
+      },
+      "item": {
+        "requests_per_sec": 130737.57132284896,
+        "p50_ms": 0.745834,
+        "p99_ms": 1.116917,
+        "requests": 1307706,
+        "status_codes": {
+          "200": 1307706
+        },
+        "errors": {}
+      }
+    },
+    "flask": {
+      "plaintext": {
+        "requests_per_sec": 2569.842596480086,
+        "p50_ms": 2172.427917,
+        "p99_ms": 7844.039125,
+        "requests": 116,
+        "status_codes": {
+          "200": 116
+        },
+        "errors": {
+          "Can't assign requested address (os error 49)": 25625,
+          "timeout": 1
+        }
+      },
+      "json": {
+        "requests_per_sec": 2463.174705234089,
+        "p50_ms": 1155.170375,
+        "p99_ms": 8858.96275,
+        "requests": 133,
+        "status_codes": {
+          "200": 133
+        },
+        "errors": {
+          "Can't assign requested address (os error 49)": 24537,
+          "timeout": 1
+        }
+      },
+      "item": {
+        "requests_per_sec": 3650.9167547971856,
+        "p50_ms": 8.981207999999999,
+        "p99_ms": 1140.224,
+        "requests": 16032,
+        "status_codes": {
+          "200": 16032
+        },
+        "errors": {
+          "Can't assign requested address (os error 49)": 20534
+        }
+      }
+    },
+    "fulmen": {
+      "plaintext": {
+        "requests_per_sec": 85808.46201568547,
+        "p50_ms": 0.366542,
+        "p99_ms": 7.326875,
+        "requests": 858460,
+        "status_codes": {
+          "200": 858460
+        },
+        "errors": {}
+      },
+      "json": {
+        "requests_per_sec": 82927.34981325449,
+        "p50_ms": 0.372041,
+        "p99_ms": 8.165875,
+        "requests": 829571,
+        "status_codes": {
+          "200": 829571
+        },
+        "errors": {}
+      },
+      "item": {
+        "requests_per_sec": 82657.01363542816,
+        "p50_ms": 0.378167,
+        "p99_ms": 7.780709,
+        "requests": 827071,
+        "status_codes": {
+          "200": 827071
+        },
+        "errors": {}
+      }
+    },
+    "fulmen_async": {
+      "plaintext": {
+        "requests_per_sec": 140097.00535026033,
+        "p50_ms": 0.7105,
+        "p99_ms": 0.924791,
+        "requests": 1401332,
+        "status_codes": {
+          "200": 1401332
+        },
+        "errors": {}
+      },
+      "json": {
+        "requests_per_sec": 139853.145454458,
+        "p50_ms": 0.7112499999999999,
+        "p99_ms": 0.91425,
+        "requests": 1398881,
+        "status_codes": {
+          "200": 1398881
+        },
+        "errors": {}
+      },
+      "item": {
+        "requests_per_sec": 139714.5527386311,
+        "p50_ms": 0.711375,
+        "p99_ms": 0.930375,
+        "requests": 1397504,
+        "status_codes": {
+          "200": 1397504
+        },
+        "errors": {}
+      }
+    },
+    "ceiling": {
+      "plaintext": {
+        "requests_per_sec": 148579.10440457438,
+        "p50_ms": 0.669709,
+        "p99_ms": 0.806083,
+        "requests": 1486193,
+        "status_codes": {
+          "200": 1486193
+        },
+        "errors": {}
+      },
+      "json": {
+        "requests_per_sec": 147824.76101515084,
+        "p50_ms": 0.673,
+        "p99_ms": 0.811125,
+        "requests": 1478566,
+        "status_codes": {
+          "200": 1478566
+        },
+        "errors": {}
+      },
+      "item": {
+        "requests_per_sec": 145799.65128114828,
+        "p50_ms": 0.682083,
+        "p99_ms": 0.8260000000000001,
+        "requests": 1458420,
+        "status_codes": {
+          "200": 1458420
+        },
+        "errors": {}
+      }
+    }
+  }
+}

@@ -75,6 +75,7 @@ select = [
 "python/tests/**" = ["S101"]
 "python/fulmen/cli.py" = ["T201"]
 "scripts/**" = ["T201", "S603", "S607"]
+"benches/**" = ["T201", "S603", "S607"]
 
 [tool.coverage.run]
 source = ["fulmen"]

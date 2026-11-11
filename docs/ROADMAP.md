@@ -110,15 +110,21 @@ built on it.
 ### Benchmarks
 
 - [x] M1.24 `benches/micro`: criterion for router and response writing
-- [ ] M1.25 `benches/e2e`: `oha` scenarios, comparison apps for FastAPI, Litestar, Robyn, Flask
-- [ ] M1.26 `just bench` and `just bench-check` with `benches/baseline.json` and the 5% rule
-- [ ] M1.27 Benchmark the pure-Rust dispatcher (ceiling) vs Python sync vs Python async
-- [ ] M1.28 Decide Q1 (loop per process vs per thread) and Q2 (batch defaults); record in DESIGN.md §28
+- [x] M1.25 `benches/e2e`: `oha` scenarios, comparison apps for FastAPI, Litestar, Robyn, Flask
+      (`run.py` matrix runner, `apps/fulmen_async_app.py`, `ceiling-server` bin)
+- [x] M1.26 `just bench` and `just bench-check` with `benches/baseline.json` and the 5% rule
+- [x] M1.27 Benchmark the pure-Rust dispatcher (ceiling) vs Python sync vs Python async
+      (≈148k vs ≈83k vs ≈140k req/s on `/json` at 12 workers — `benches/results/0.1.0.md`)
+- [x] M1.28 Decide Q1 (loop per process vs per thread) and Q2 (batch defaults); record in DESIGN.md §28
+      (Q1→D16 one loop per app; Q2→D17 batch size stays 32)
 
 ### Guardrails added in M1
 
-- [ ] M1.29 `bench-check` in `just ci` once a baseline exists
-- [ ] M1.30 Server integration tests on all four interpreters in `just test-matrix`
+- [x] M1.29 `bench-check` in `just ci` once a baseline exists
+      (the `ci` recipe runs it only when `benches/baseline.json` is present)
+- [x] M1.30 Server integration tests on all four interpreters in `just test-matrix`
+      (3.14t leg verified end-to-end: `serve_for_test` real-socket tests and
+      multi-process worker tests pass with the GIL disabled)
 
 ### Exit criteria
 

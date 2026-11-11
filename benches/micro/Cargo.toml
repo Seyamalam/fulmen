@@ -9,6 +9,11 @@ authors.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+fulmen-server.workspace = true
+http.workspace = true
+socket2.workspace = true
+
 [dev-dependencies]
 fulmen-core.workspace = true
 fulmen-server.workspace = true
@@ -16,6 +21,10 @@ criterion.workspace = true
 http.workspace = true
 bytes.workspace = true
 tokio.workspace = true
+
+[[bin]]
+name = "ceiling-server"
+path = "src/ceiling_server.rs"
 
 [[bench]]
 name = "micro"

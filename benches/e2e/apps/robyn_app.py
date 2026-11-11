@@ -1,6 +1,9 @@
 """Robyn comparison app for the M1.25 end-to-end benchmarks.
 
-Run: python -m robyn benches/e2e/apps/robyn_app.py --port 8102
+Run: python benches/e2e/apps/robyn_app.py --processes N
+(robyn reads `--processes`/`--workers` from argv; the bind address comes
+from the ROBYN_HOST/ROBYN_PORT environment variables — there is no
+`--port` CLI flag in robyn 0.88).
 """
 
 from robyn import Response, Robyn
@@ -25,3 +28,7 @@ def json_route() -> dict[str, str]:
 @app.get("/items/:item_id")
 def get_item(item_id: str) -> dict[str, int]:
     return {"item_id": int(item_id)}
+
+
+if __name__ == "__main__":
+    app.start()

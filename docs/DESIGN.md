@@ -1200,7 +1200,14 @@ These are goals to verify in M1 and track afterwards, measured on the same
 machine with the same worker count against FastAPI + uvicorn (uvloop,
 httptools):
 
-- Plain text and JSON hello world: at least 5× the requests per second.
+- Plain text and JSON hello world: at least 5× the requests per second
+  *per worker process* (M1 measured on `/json`, `oha` c=100: 6.1× sync,
+  10.0× async at `workers=1`). Revised from a flat "5×": at N = cores the
+  loopback + `oha` bound (~146k req/s on the M1 bench machine) compresses
+  every fast server's ratio — fulmen measured 1.9–3.3× FastAPI's
+  aggregate at 12 workers because FastAPI scales with processes while
+  fulmen's sync pool is GIL-bound per process
+  (`benches/results/0.1.0.md`).
 - Validated JSON body (10 fields): at least 5×.
 - Rejected request (401 or 422): at least 20×, because Python is never entered.
 - p99 latency under load no worse than 50% of FastAPI's.
@@ -1278,6 +1285,8 @@ measured reason.
 | D13 | CI/CD | Local (`just`, git hooks) | GitHub Actions | Maintainer preference; one machine, reproducible pinned toolchain. |
 | D14 | License | Apache-2.0 + trademark policy | MIT, AGPL-3.0 | Patent grant, attribution via NOTICE, name protection; permissive enough for adoption. |
 | D15 | Multi-process workers (Q6) | `SO_REUSEPORT` on all POSIX (Linux + macOS); Python supervisor; Windows refuses `workers > 1` | acceptor process with socket passing, single process everywhere, prefork on Linux only | `SO_REUSEPORT` works on macOS exactly like Linux (verified: two workers shared one port), so no acceptor layer is needed at all; Windows has neither `fork` nor `SO_REUSEPORT`, so v1 stays single-process there rather than shipping a second worker model. |
+| D16 | Asyncio loops per app (Q1) | One loop per app for M1; revisit if async shows loop saturation on heavier handlers | per-thread loops, per-worker-pool loops | `--workers N` already gives N loop threads. A single loop thread saturates ~1 core while serving ≈135–140k req/s of trivial handlers — the measured transport bound, not a loop bottleneck (async/sync ratio ≈1.7, `benches/results/0.1.0.md`). On GIL builds extra loop threads would serialize on the GIL anyway; the option only gains meaning on free-threaded builds. |
+| D17 | GIL batch size default (Q2) | Keep 32 | 1, 8, 64 | Sweep on the sync JSON scenario (`oha`, c=100, 10 s, release build): batch 1 → 79.4k, 8 → 83.1k, 32 → 82.7k, 64 → 83.1k req/s at 12 workers; 79.6k / 78.2k / 80.9k / 80.5k at 1 worker — within run-to-run noise because trivial handlers never build the backlog the knob amortizes (§7.5). 32 stays: it costs nothing when unneeded and pays off under real per-call work. |
 
 ## 29. Open questions
 
@@ -1286,8 +1295,6 @@ and removed from here.
 
 | # | Question | Decide in |
 | --- | --- | --- |
-| Q1 | One asyncio loop per process vs per thread on free-threaded builds | M1 (benchmark) |
-| Q2 | GIL batch size default (32) | M1 (benchmark) |
 | Q3 | JSON engine: `sonic-rs`, `serde_json` + custom visitor, or own parser | M2 (benchmark) |
 | Q4 | 404 vs 422 for path parameters that fail type checks | M2 |
 | Q5 | Whether `Model` instances are mutable by default | M2 |

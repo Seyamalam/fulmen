@@ -227,6 +227,7 @@ dependencies = [
  "fulmen-core",
  "fulmen-server",
  "http",
+ "socket2",
  "tokio",
 ]
 

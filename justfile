@@ -35,18 +35,18 @@ develop *args:
 # Format Rust and Python in place.
 fmt:
     cargo fmt --all
-    {{bin}}/ruff format python scripts
-    {{bin}}/ruff check --fix python scripts
+    {{bin}}/ruff format python scripts benches
+    {{bin}}/ruff check --fix python scripts benches
 
 # ---- checks (all read-only) ---------------------------------------------
 
 fmt-check:
     cargo fmt --all --check
-    {{bin}}/ruff format --check python scripts
+    {{bin}}/ruff format --check python scripts benches
 
 lint:
     cargo clippy --workspace --all-targets --locked -- -D warnings
-    {{bin}}/ruff check python scripts
+    {{bin}}/ruff check python scripts benches
     {{bin}}/pyright
 
 typos:
@@ -92,13 +92,33 @@ commits:
 cov-rust:
     cargo llvm-cov --workspace --exclude fulmen-py --html
 
+# ---- benchmarks (M1.25–M1.27) --------------------------------------------
+
+# Release build into both venvs, then the full e2e matrix; writes
+# benches/e2e/results/latest.json and (re)writes benches/baseline.json.
+# `just bench -- --duration 5` passes extra flags to the runner.
+bench *args:
+    just develop -r
+    @[ -d benches/e2e/.venv ] || uv venv -p 3.12 benches/e2e/.venv
+    uv pip install -q -p benches/e2e/.venv -r benches/e2e/requirements.txt
+    VIRTUAL_ENV=benches/e2e/.venv {{bin}}/maturin develop -r -q
+    cargo build -r -p fulmen-bench --bin ceiling-server --locked
+    {{py}} benches/e2e/run.py --set-baseline {{args}}
+
+# Compare the latest e2e run against benches/baseline.json: any tracked
+# scenario >5% slower (requests/sec) fails (docs/GUARDRAILS.md).
+bench-check:
+    {{py}} benches/e2e/check.py
+
 # ---- gates -------------------------------------------------------------
 
 # Fast gate for every commit.
 pre-commit: fmt-check typos guardrails
 
 # Full gate: run before every push (the pre-push hook does this).
+# bench-check joins the gate once a baseline exists (M1.29).
 ci: fmt-check typos guardrails commits lint deny test-rust test-py test-matrix
+    @if [ -f benches/baseline.json ]; then just bench-check; else echo "no benches/baseline.json; skipping bench-check"; fi
     @echo "local CI passed"
 
 # ---- release (CD) ------------------------------------------------------
