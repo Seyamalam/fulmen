@@ -5,7 +5,7 @@ members = ["crates/*", "benches/micro"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.96"
 license = "Apache-2.0"
 authors = ["Seyamalam"]
 repository = "https://github.com/Seyamalam/fulmen"
@@ -40,7 +40,7 @@ bytes = "1.10"
 http-body-util = "0.1"
 # SO_REUSEPORT socket setup for multi-process workers (§7.2); unix-only
 # use, declared for fulmen-py which is dep-exempt.
-socket2 = "=0.6.2"
+socket2 = "0.6.5"
 
 # Guardrails. `just ci` runs clippy with `-D warnings`, so every "warn" here
 # blocks a merge. To opt out locally, use `#[expect(lint, reason = "...")]`;
