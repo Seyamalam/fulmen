@@ -613,6 +613,29 @@ source of truth.
 - Limits: max depth 64, max items per container 100 000, max string length
   = body limit. Exceeding them is a 422, never a crash.
 
+The Rust half landed as `fulmen_schema::json` + `fulmen_schema::sources`
+(D18):
+
+- `decode_json(&[u8]) -> Result<Value<'_>, DecodeError>` — a one-pass
+  byte-slice parser; unescaped strings and big-int text borrow the
+  request buffer. Duplicate object keys are kept in input order, so
+  `get`/record/dict resolution is last-wins, like `json.loads`.
+- `decode_and_validate(&[u8], &Validator)
+  -> Result<Cow<Value>, PayloadError>` decodes under the validator's
+  `Limits` (the bounds `Any`/`Raw` get too, mid-walk) then validates in
+  `Mode::Strict` as `Source::Body`. `PayloadError::{Malformed, Limit,
+  Validation}` keeps the 400/422 split a router needs.
+- Text sources become `Value`s for `Mode::Lax`:
+  `decode_query`/`decode_form` (`a=1&a=2` → `{"a": ["1", "2"]}`,
+  `?a` → `{"a": ""}` — a bare key is present-but-empty, percent-decoded,
+  UTF-8 errors are structured 400s), `decode_cookie` (`a=1; b=2` → the
+  same object shape, no percent-decoding, one pair of value quotes
+  stripped), and `validate_text(&str, &Validator, Source)` for single
+  path/header/cookie values. Header values stay opaque strings.
+- Malformed JSON/text → `{code, position, message}` (400); limit and
+  validation failures → §11.7 entries (422). Input values are never
+  echoed.
+
 ### 11.5 Model
 
 `fulmen.Model` is a slotted class whose `__init__` is native. It validates on
@@ -1287,6 +1310,7 @@ measured reason.
 | D15 | Multi-process workers (Q6) | `SO_REUSEPORT` on all POSIX (Linux + macOS); Python supervisor; Windows refuses `workers > 1` | acceptor process with socket passing, single process everywhere, prefork on Linux only | `SO_REUSEPORT` works on macOS exactly like Linux (verified: two workers shared one port), so no acceptor layer is needed at all; Windows has neither `fork` nor `SO_REUSEPORT`, so v1 stays single-process there rather than shipping a second worker model. |
 | D16 | Asyncio loops per app (Q1) | One loop per app for M1; revisit if async shows loop saturation on heavier handlers | per-thread loops, per-worker-pool loops | `--workers N` already gives N loop threads. A single loop thread saturates ~1 core while serving ≈135–140k req/s of trivial handlers — the measured transport bound, not a loop bottleneck (async/sync ratio ≈1.7, `benches/results/0.1.0.md`). On GIL builds extra loop threads would serialize on the GIL anyway; the option only gains meaning on free-threaded builds. |
 | D17 | GIL batch size default (Q2) | Keep 32 | 1, 8, 64 | Sweep on the sync JSON scenario (`oha`, c=100, 10 s, release build): batch 1 → 79.4k, 8 → 83.1k, 32 → 82.7k, 64 → 83.1k req/s at 12 workers; 79.6k / 78.2k / 80.9k / 80.5k at 1 worker — within run-to-run noise because trivial handlers never build the backlog the knob amortizes (§7.5). 32 stays: it costs nothing when unneeded and pays off under real per-call work. |
+| D18 | JSON engine (Q3) | Own byte-slice parser in `fulmen-schema` (`decode_json`) | `sonic-rs`, `serde_json` + custom visitor | `simd-json`/`sonic-rs` need `unsafe`, which `fulmen-schema` forbids; `serde_json` materializes its own `Value` (a second pass) and pulls `serde` into a dep-restricted crate. A purpose-built parser produces our `Value<'a>` with borrowed `Cow` strings in one pass and enforces depth/items/string limits *mid-walk* — the only bound `Any`/`Raw` payloads get — with byte-position error codes serde can't give. Measured (M-series laptop, release): 599 ns for a 134 B object, ~1 GB/s on 13 KB of borrowed strings, 385 MB/s on a 2.3 KB nested body — pydantic-core-class, so the §11.4 one-pass thesis holds without new deps. Revisit if profiling shows decode dominating the request path, or if we need JSON Lines/streaming incremental input a byte-slice parser can't give. |
 
 ## 29. Open questions
 
@@ -1295,7 +1319,7 @@ and removed from here.
 
 | # | Question | Decide in |
 | --- | --- | --- |
-| Q3 | JSON engine: `sonic-rs`, `serde_json` + custom visitor, or own parser | M2 (benchmark) |
+| Q3 | ~~JSON engine: `sonic-rs`, `serde_json` + custom visitor, or own parser~~ — decided: own byte-slice parser (D18, §11.4) | ~~M2~~ done |
 | Q4 | 404 vs 422 for path parameters that fail type checks | M2 |
 | Q5 | Whether `Model` instances are mutable by default | M2 |
 | Q6 | ~~Worker model on macOS/Windows (socket passing vs single process)~~ — decided: `SO_REUSEPORT` on macOS too; Windows single-process (D15, §7.2) | ~~M1~~ done |

@@ -12,6 +12,26 @@ exists. Move the `Unreleased` entries under the new version heading first.
 
 ### Added
 
+- Schema decoding + source adapters (`fulmen-schema`, M2.6–M2.8 + M2.10,
+  Rust half): `decode_json(&[u8])` — a purpose-built one-pass byte-slice
+  JSON parser (Q3 → D18; strict RFC 8259, no `unsafe`, no new deps) that
+  produces `Value<'a>` with borrowed strings and `BigInt` text, enforces
+  `max_depth`/`max_items`/`max_str_bytes` *mid-walk* (the bound
+  `Any`/`Raw` payloads get), and reports malformed input as `{code,
+  position, message}` (HTTP 400) vs `DecodeError::Limit` as §11.7
+  entries (422). `decode_and_validate(&[u8], &Validator)` composes both
+  steps with a `PayloadError::{Malformed, Limit, Validation}` split;
+  `Validator::validate_out` + `Checked::{Same, New}` let rewritten
+  values escape the composed call with the input buffer's lifetime.
+  Lax text sources: `decode_query`/`decode_form` (percent-decoded
+  name=value pairs, repeated keys → `Array`, bare `?a` → `""`),
+  `decode_cookie` (`a=1; b=2`, no percent-decoding), and
+  `validate_text(&str, &Validator, Source)` for path/header/cookie
+  scalars — UTF-8/percent-escape failures are structured 400s. Wire
+  errors without serde: `ErrorEntry::loc_pointer()`/`problem()`,
+  `ValidationErrors::to_json()`/`to_problem_entries()`, and
+  `LiteralValue::to_json()` for `limit` fields — messages never echo
+  input values.
 - Schema engine (`fulmen-schema`, M2.1–M2.5, Rust half): the `TypeDesc`
   descriptor IR covering every type in DESIGN.md §11.1 plus the §11.2
   constraint set, a `compile()` step that rejects invalid descriptors at

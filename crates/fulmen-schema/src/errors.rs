@@ -17,9 +17,9 @@
 //! Input values are never embedded in errors — they may contain secrets
 //! (§11.7).
 
-use std::fmt::{self, Write};
+use std::fmt;
 
-use crate::value::LiteralValue;
+use crate::value::{LiteralValue, escape_json};
 
 /// Which part of the request a validation error came from — the first
 /// segment of the rendered `loc`.
@@ -255,6 +255,50 @@ impl ErrorEntry {
         }
         out
     }
+
+    /// Alias for [`ErrorEntry::pointer`] — the wire `loc` string.
+    pub fn loc_pointer(&self) -> String {
+        self.pointer()
+    }
+
+    /// A borrowed, stable view of this entry for hand-written encoders
+    /// (M2.10): `fulmen-py` serializes [`ProblemEntry`]s into the §11.7
+    /// `errors` array without serde — fields walk straight into the
+    /// JSON writer.
+    pub fn problem(&self) -> ProblemEntry<'_> {
+        ProblemEntry {
+            loc_pointer: self.pointer(),
+            source: self.source,
+            loc: &self.loc,
+            code: self.code.as_str(),
+            message: &self.message,
+            limit: self.limit.as_ref(),
+        }
+    }
+}
+
+/// A stable serialization view of one [`ErrorEntry`] — the §11.7
+/// `"errors"` member shape for encoders that do not use serde.
+///
+/// `loc` is offered twice on purpose: `loc_pointer` is the rendered
+/// JSON pointer (`"/body/email"`) for the wire, while `loc` keeps the
+/// typed [`LocSeg`]s (excluding the `source` prefix) for programmatic
+/// walks such as `OpenAPI` or client-side error mapping.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProblemEntry<'a> {
+    /// `loc` rendered as a JSON pointer including the source prefix.
+    pub loc_pointer: String,
+    /// Which part of the request the error came from.
+    pub source: Source,
+    /// `loc` as typed segments (excluding `source`).
+    pub loc: &'a [LocSeg],
+    /// The machine code string ([`ErrorCode::as_str`]).
+    pub code: &'static str,
+    /// The human message — never echoes input values (§11.7).
+    pub message: &'a str,
+    /// The violated bound for bound-shaped codes, renderable via
+    /// [`LiteralValue::to_json`].
+    pub limit: Option<&'a LiteralValue>,
 }
 
 /// The collector validators push into (§11.7 — all errors, one pass).
@@ -341,7 +385,7 @@ impl ValidationErrors {
 
     /// The §11.7 `errors` array rendered as a JSON string — a convenience
     /// for callers that do not walk entries themselves. Strings are
-    /// JSON-escaped; `limit` renders via `LiteralValue::wire_text`.
+    /// JSON-escaped; `limit` renders via [`LiteralValue::to_json`].
     pub fn to_json(&self) -> String {
         let mut out = String::with_capacity(self.entries.len() * 64 + 2);
         out.push('[');
@@ -358,43 +402,18 @@ impl ValidationErrors {
             out.push('"');
             if let Some(l) = &e.limit {
                 out.push_str(",\"limit\":");
-                out.push_str(&limit_json(l));
+                out.push_str(&l.to_json());
             }
             out.push('}');
         }
         out.push(']');
         out
     }
-}
 
-fn escape_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < '\x20' => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-fn limit_json(l: &LiteralValue) -> String {
-    match l {
-        LiteralValue::Null => "null".to_owned(),
-        LiteralValue::Bool(b) => b.to_string(),
-        LiteralValue::Int(i) => i.to_string(),
-        LiteralValue::UInt(u) => u.to_string(),
-        LiteralValue::BigInt(t) => t.to_string(),
-        LiteralValue::Float(f) => format!("{f:?}"),
-        LiteralValue::Str(s) => format!("\"{}\"", escape_json(s)),
-        LiteralValue::Bytes(b) => format!("\"{}\"", escape_json(&b.escape_ascii().to_string())),
+    /// The entries as [`ProblemEntry`] views — a stable, serde-free
+    /// shape for `fulmen-py`'s hand-written JSON output (M2.10).
+    pub fn to_problem_entries(&self) -> Vec<ProblemEntry<'_>> {
+        self.entries.iter().map(ErrorEntry::problem).collect()
     }
 }
 
