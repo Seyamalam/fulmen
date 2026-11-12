@@ -32,6 +32,7 @@ use tokio::sync::oneshot;
 
 use crate::app::StartupError;
 use crate::convert::{self, CallOutcome, ErrorTable, InvokeError, JobAnswer, ParamArg, PyCtx};
+use crate::dispatch::{LaneDeps, ResponseContract};
 
 /// How long [`AsyncLoop::start`] waits for the loop thread to report ready.
 const LOOP_READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -103,6 +104,9 @@ struct AsyncJob {
     label: Box<str>,
     /// When the request entered the queue (queue-deadline basis).
     enqueued: Instant,
+    /// The route's declared response contract — picks the encode
+    /// descriptor by actual status.
+    contract: Arc<ResponseContract>,
     /// `-> None`/`-> NoContent` declared: `None` returns answer `204`.
     none_ok: bool,
     /// `false` on `on_error`-handler jobs: their failures never defer again.
@@ -117,6 +121,8 @@ struct Pending {
     label: Box<str>,
     /// The handler object, kept for error log lines.
     callable: Arc<Py<PyAny>>,
+    /// The route's declared response contract, for `complete`'s ctx.
+    contract: Arc<ResponseContract>,
     /// The job's `none_ok`/`route_errors` flags, for `complete`'s ctx.
     none_ok: bool,
     /// `false` on `on_error`-handler jobs.
@@ -192,6 +198,9 @@ struct AsyncShared {
     response_cls: Arc<Py<PyAny>>,
     /// The app's `@app.on_error` table (§17).
     errors: Arc<ErrorTable>,
+    /// `Fulmen(debug=True)`/`serve(debug=…)`: every handler result is
+    /// validated against its declared response descriptor (§11.6).
+    debug: bool,
 }
 
 /// Lock a mutex, recovering from poison.
@@ -267,9 +276,7 @@ impl AsyncLoop {
         loop_impl: LoopImpl,
         capacity: usize,
         deadline: Duration,
-        logger: Arc<Py<PyAny>>,
-        response_cls: Arc<Py<PyAny>>,
-        errors: Arc<ErrorTable>,
+        deps: LaneDeps,
     ) -> PyResult<Self> {
         let shared = Arc::new(AsyncShared {
             queue: Mutex::new(AsyncQueue {
@@ -281,9 +288,10 @@ impl AsyncLoop {
             next_id: AtomicU64::new(0),
             capacity,
             deadline,
-            logger,
-            response_cls,
-            errors,
+            logger: deps.logger,
+            response_cls: deps.response_cls,
+            errors: deps.errors,
+            debug: deps.debug,
         });
         let ready = Arc::new(Ready {
             slot: Mutex::new(None),
@@ -319,11 +327,16 @@ impl AsyncLoop {
     /// # Errors
     /// [`AsyncSubmitError::Full`] when the bounded queue has no room;
     /// [`AsyncSubmitError::Unavailable`] when the loop is gone.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per job field; the job itself is the loop's type"
+    )]
     pub(crate) fn submit(
         &self,
         callable: Arc<Py<PyAny>>,
         args: Box<[ParamArg]>,
         label: Box<str>,
+        contract: Arc<ResponseContract>,
         none_ok: bool,
         route_errors: bool,
         respond: oneshot::Sender<JobAnswer>,
@@ -340,6 +353,7 @@ impl AsyncLoop {
                 args,
                 label,
                 enqueued: Instant::now(),
+                contract,
                 none_ok,
                 route_errors,
                 respond,
@@ -509,6 +523,8 @@ impl AsyncPump {
             none_ok: pending.none_ok,
             route_errors: pending.route_errors,
             label: &pending.label,
+            contract: &pending.contract,
+            debug: self.shared.debug,
         };
         let outcome = match task.call_method0(py, "result") {
             Ok(obj) => convert::settle(
@@ -541,6 +557,8 @@ impl AsyncPump {
             none_ok: job.none_ok,
             route_errors: job.route_errors,
             label: &job.label,
+            contract: &job.contract,
+            debug: self.shared.debug,
         };
         if job.enqueued.elapsed() > self.shared.deadline {
             let _ = job
@@ -602,6 +620,7 @@ impl AsyncPump {
             Pending {
                 label: job.label.clone(),
                 callable: Arc::clone(&job.callable),
+                contract: Arc::clone(&job.contract),
                 none_ok: job.none_ok,
                 route_errors: job.route_errors,
                 respond: job.respond,

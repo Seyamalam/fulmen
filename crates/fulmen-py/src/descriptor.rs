@@ -46,17 +46,18 @@ use pyo3::types::{
 
 /// Depth cap for `extract_value` — Python-side recursion is bounded by the
 /// same limit the JSON decoder uses for request bodies.
-const MAX_EXTRACT_DEPTH: usize = 200;
+pub(crate) const MAX_EXTRACT_DEPTH: usize = 200;
 
 // ---- lazily imported Python classes ----------------------------------------
 
 /// One lazily-resolved Python class (`module.attr`, possibly a dotted
-/// qualname). Resolved once per process under the GIL.
-static DECIMAL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static UUID_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static IPV4: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static IPV6: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static ENUM: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+/// qualname). Resolved once per process under the GIL. `pub(crate)` —
+/// the response encoder checks the same classes.
+pub(crate) static DECIMAL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+pub(crate) static UUID_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+pub(crate) static IPV4: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+pub(crate) static IPV6: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+pub(crate) static ENUM: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DATETIME: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DATE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -1156,7 +1157,10 @@ fn materialize_union<'a>(
     }
 }
 
-fn record_of(desc: &TypeDesc) -> Option<&RecordDesc> {
+/// The [`RecordDesc`] inside a `Record` (or `Generic` origin) node.
+/// `pub(crate)` — the response encoder resolves generic bindings and
+/// union tags through it.
+pub(crate) fn record_of(desc: &TypeDesc) -> Option<&RecordDesc> {
     match &desc.kind {
         Kind::Record(r) => Some(r),
         Kind::Generic(g) => record_of(&g.origin),
@@ -1542,6 +1546,12 @@ impl Descriptor {
     /// The descriptor's `TypeDesc` (for kind checks at extraction).
     pub(crate) fn type_desc(&self) -> &TypeDesc {
         &self.desc
+    }
+
+    /// The `default_factory` callback table (`Missing::Bridge` handles
+    /// index into it — output encoding and materialization share it).
+    pub(crate) fn callbacks(&self) -> &[Py<PyAny>] {
+        &self.callbacks
     }
 
     /// Materialize an *already validated* `Value` — the extraction path

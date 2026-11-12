@@ -76,6 +76,28 @@ exists. Move the `Unreleased` entries under the new version heading first.
   disabled (`JobAnswer::Deferred`). Path-param `int` mismatches stay 404
   by construction, other scalars 422 (Q4 → D20). Pyright strict clean;
   `_fulmen.pyi` documents every new `#[pyfunction]`/`#[pyclass]`.
+- Descriptor-driven response encoding + debug output validation
+  (M2.9, DESIGN.md §11.6/§14.2): a declared return annotation now drives
+  the response walk instead of generic dict/list conversion — records
+  emit fields in descriptor order under their wire keys (alias/rename),
+  `datetime`/`date`/`time` → RFC 3339/ISO text, `timedelta` → ISO 8601
+  durations, `Decimal` → string, `UUID`/IPs → string, `Enum` → member
+  value, `bytes` → base64 inside JSON, sets → arrays, and
+  `Model`/`dataclass`/`TypedDict`/dict/tuple/union/generic results
+  encode recursively by descriptor (no `__dict__`/`isinstance`
+  guessing). `response_descs` selects the variant by the response's
+  actual status — `Created[T]`, `Response(body, status=…)` and
+  same-status unions all pick the right descriptor, with a
+  single-declared or unique-200 fallback; unmatched contracts fall back
+  to the generic path (debug warns). §10.2 channels survive: `-> str`
+  stays `text/plain`, `-> bytes` stays `application/octet-stream`,
+  `Any`/`Raw`/unannotated keep the generic walk. `Fulmen(debug=True)`
+  or `serve(..., debug=True)` additionally runs every result through
+  the variant's `Validator` — violations answer `500
+  application/problem+json` with the `errors` entries and the handler
+  identity in the log; non-debug keeps a single structural pass.
+  `/json` measured 5% faster and the typed-param route 13% faster than
+  the generic-walk baseline (`benches/e2e/results/latest.json`).
 - OpenAPI 3.1 generation and docs UI (M2.11): `app.openapi()` walks the
   frozen route spec (`call_args`, `param_types`, `response_descs`,
   `Descriptor.spec`) and renders a deterministic OpenAPI 3.1 document —

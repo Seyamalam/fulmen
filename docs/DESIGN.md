@@ -653,8 +653,17 @@ type, so it knows field order and types in advance and does no
 `bytes` → base64, `Enum` → value. Unknown types are a startup error, not a
 runtime surprise.
 
-In debug mode the encoder also checks that the value matches the declared
-return type and reports mismatches.
+The walk is always-on structural checking: a result that does not fit its
+descriptor is a contract violation that rides the internal-error path —
+it can never leak a silently-wrong body. In debug mode
+(`Fulmen(debug=True)` or `serve(debug=True)`) the encoded wire value
+additionally passes through the variant's compiled validator — a `str`
+returning an `int` is caught structurally in either mode, but a
+`Range(le=10)` return annotation's bounds only bite under debug, where a
+violation answers `500 application/problem+json` carrying the `errors`
+entries and the handler identity in the log. The §10.2 runtime-type
+channels still govern the top level (`-> str` → `text/plain`, `-> bytes`
+→ `application/octet-stream`); descriptors rule inside JSON.
 
 ### 11.7 Validation errors
 

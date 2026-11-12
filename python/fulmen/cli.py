@@ -50,7 +50,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=32,
         help="max sync handlers run per GIL acquisition under backlog (default: 32)",
     )
-    run.add_argument("--debug", action="store_true", help="reserved; no effect yet")
+    run.add_argument(
+        "--debug",
+        action="store_true",
+        help="debug mode: validate every handler return against its declared response type",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "info":

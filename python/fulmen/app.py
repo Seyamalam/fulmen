@@ -60,9 +60,33 @@ _RouteSpec = tuple[
 
 
 class Fulmen:
-    """A Fulmen application: routes and error handlers, then `run()`."""
+    """A Fulmen application: routes and error handlers, then `run()`.
 
-    __slots__ = ("_api_info", "_declared", "_docs_url", "_error_handlers", "_openapi_url")
+    `title`/`version`/`description`/`contact`/`license` become the OpenAPI
+    document's `info` object; `servers`/`tags` the top-level lists — each
+    item a `str` (`{"url": ...}`/`{"name": ...}` shorthand) or a full
+    OpenAPI object mapping. `openapi_url` mounts `GET <url>` serving the
+    document; `docs_url` mounts the Swagger UI page (and its self-hosted
+    assets) that reads it. `openapi_url=None` disables both endpoints —
+    nothing is generated or mounted. `docs_url=None` keeps the document
+    but drops the UI. A declared route wins over these convenience mounts
+    (§5, §23.2).
+
+    `debug=True` turns on §11.6 output validation: every handler return is
+    checked against its declared response type, and a violation answers
+    `500 application/problem+json` with the validation errors (the handler
+    identity is logged). Serving flags (`run(debug=…)`, `--debug`) enable
+    the same checks for an app built without the flag.
+    """
+
+    __slots__ = (
+        "_api_info",
+        "_debug",
+        "_declared",
+        "_docs_url",
+        "_error_handlers",
+        "_openapi_url",
+    )
 
     def __init__(
         self,
@@ -76,27 +100,14 @@ class Fulmen:
         tags: Iterable[str | Mapping[str, Any]] | None = None,
         openapi_url: str | None = "/openapi.json",
         docs_url: str | None = "/docs",
+        debug: bool = False,
     ) -> None:
-        """Application metadata and docs serving switches (§5, §23.2).
-
-        `title`/`version`/`description`/`contact`/`license` become the
-        document's `info` object; `servers`/`tags` the top-level lists —
-        each item a `str` (`{"url": ...}`/`{"name": ...}` shorthand) or a
-        full OpenAPI object mapping.
-
-        `openapi_url` mounts `GET <url>` serving the OpenAPI 3.1
-        document; `docs_url` mounts the Swagger UI page (and its
-        self-hosted assets) that reads it. `openapi_url=None` disables
-        both endpoints — nothing is generated or mounted, so an app that
-        opts out pays exactly nothing. `docs_url=None` keeps the
-        document but drops the UI. A declared route wins over these
-        convenience mounts.
-        """
         for name, url in (("openapi_url", openapi_url), ("docs_url", docs_url)):
             if url is not None and (not url.startswith("/") or '"' in url):
                 raise ValueError(
                     f"{name} must be None or an absolute path starting with '/', got {url!r}"
                 )
+        self._debug = debug
         self._declared: list[tuple[str, str, _Handler, _openapi.OperationMeta]] = []
         self._error_handlers: list[tuple[type[BaseException], _Handler, bool]] = []
         self._api_info = _openapi.ApiInfo(
@@ -209,6 +220,10 @@ class Fulmen:
         `SO_REUSEPORT` on Linux and macOS; other platforms refuse it and
         stay single-process (DESIGN.md §7.2, decision D15).
 
+        `debug=True` turns on §11.6 output validation for this serving —
+        every handler return is checked against its declared response type
+        and violations answer `500 application/problem+json`.
+
         `uvloop` selects the event loop for `async def` handlers (§7.4):
         `None` uses uvloop when the package is installed, `False` forces
         plain asyncio, `True` requires uvloop and fails startup without it.
@@ -262,7 +277,7 @@ class Fulmen:
         raised as one `StartupError` in the same format Rust produces for
         core compile errors.
         """
-        native = NativeApp()
+        native = NativeApp(debug=self._debug)
         specs, problems = self._route_specs()
         for spec, _meta in specs:
             native.add_route(spec)

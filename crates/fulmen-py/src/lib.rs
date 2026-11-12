@@ -24,6 +24,7 @@ mod app;
 mod convert;
 mod descriptor;
 mod dispatch;
+mod encode;
 mod extract;
 mod json;
 mod pool;

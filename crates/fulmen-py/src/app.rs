@@ -14,8 +14,8 @@ use crate::aloop::{self, AsyncLoop};
 use crate::convert::ErrorTable;
 use crate::descriptor::Descriptor;
 use crate::dispatch::{
-    AppInner, CallSource, CallSpecArg, HandlerEntry, MissingArg, ParamSchema, PyDispatcher,
-    ResponseDesc,
+    AppInner, CallSource, CallSpecArg, HandlerEntry, LaneDeps, MissingArg, ParamSchema,
+    PyDispatcher, ResponseContract, ResponseVariant,
 };
 use crate::pool::SyncPool;
 
@@ -124,16 +124,21 @@ struct ErrorRegistration {
 pub(crate) struct NativeApp {
     routes: Vec<RouteRegistration>,
     error_handlers: Vec<ErrorRegistration>,
+    /// `Fulmen(debug=True)` — §11.6 output validation; OR-ed with the
+    /// serving-level `debug` flag at compile.
+    pub(crate) debug: bool,
 }
 
 #[pymethods]
 impl NativeApp {
-    /// A new, empty declaration set.
+    /// A new, empty declaration set. `debug` turns on output validation.
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (debug=false))]
+    fn new(debug: bool) -> Self {
         Self {
             routes: Vec::new(),
             error_handlers: Vec::new(),
+            debug,
         }
     }
 
@@ -175,6 +180,9 @@ pub(crate) struct BridgeConfig {
     /// GIL batching size for the sync pool (§7.5); ignored on free-threaded
     /// builds, where batching never pays.
     pub(crate) gil_batch_size: usize,
+    /// Serving-level debug flag (`serve(debug=…)`); the compiled app's
+    /// effective debug is `config.debug || native.debug` (§11.6).
+    pub(crate) debug: bool,
 }
 
 impl Default for BridgeConfig {
@@ -182,6 +190,7 @@ impl Default for BridgeConfig {
         Self {
             uvloop: None,
             gil_batch_size: 32,
+            debug: false,
         }
     }
 }
@@ -228,14 +237,7 @@ pub(crate) fn compile_app(
             is_async: registration.is_async,
             none_ok: registration.none_ok,
             call_spec: call_spec.into_boxed_slice(),
-            response_descs: registration
-                .response_descs
-                .iter()
-                .map(|(status, desc)| ResponseDesc {
-                    status: *status,
-                    desc: desc.as_ref().map(|d| Arc::new(d.clone_ref(py))),
-                })
-                .collect(),
+            response_contract: response_contract(py, registration),
         });
     }
 
@@ -260,6 +262,15 @@ pub(crate) fn compile_app(
             .collect(),
     });
 
+    // §11.6: debug output validation activates from the serving flag or
+    // the app's own `Fulmen(debug=True)` declaration.
+    let deps = LaneDeps {
+        logger: logger.clone(),
+        response_cls,
+        errors,
+        debug: config.debug || native.debug,
+    };
+
     // §7.3: pool size defaults to 4× cores under the GIL, 2× free-threaded;
     // the queue is bounded at 1024 with a 5 s queue deadline (§14.4).
     let threads = default_pool_threads(py);
@@ -272,9 +283,7 @@ pub(crate) fn compile_app(
         1024,
         Duration::from_secs(5),
         batch_size,
-        logger.clone(),
-        response_cls.clone(),
-        Arc::clone(&errors),
+        deps.clone(),
     )
     .map_err(|err| StartupError::new_err(format!("failed to spawn the sync pool: {err}")))?;
 
@@ -287,9 +296,7 @@ pub(crate) fn compile_app(
             loop_impl,
             1024,
             Duration::from_secs(5),
-            logger.clone(),
-            response_cls.clone(),
-            Arc::clone(&errors),
+            deps,
         )?)
     } else {
         None
@@ -302,7 +309,38 @@ pub(crate) fn compile_app(
             logger,
             pool,
             async_loop,
+            empty_contract: Arc::new(ResponseContract::default()),
         }),
+    })
+}
+
+/// Compile a route's `response_descs` into its [`ResponseContract`]:
+/// a shared `Descriptor` handle plus a prebuilt [`Validator`] per
+/// declared variant (declaration order preserved — same-status unions
+/// try in order, status variants match exactly).
+fn response_contract(py: Python<'_>, registration: &RouteRegistration) -> Arc<ResponseContract> {
+    Arc::new(ResponseContract {
+        variants: registration
+            .response_descs
+            .iter()
+            .map(|(status, desc)| {
+                let (desc, validator) = match desc {
+                    Some(d) => {
+                        let borrowed = d.bind(py).borrow();
+                        (
+                            Some(Arc::new(d.clone_ref(py))),
+                            Some(borrowed.validator_arc()),
+                        )
+                    }
+                    None => (None, None),
+                };
+                ResponseVariant {
+                    status: *status,
+                    desc,
+                    validator,
+                }
+            })
+            .collect(),
     })
 }
 

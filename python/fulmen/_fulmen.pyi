@@ -48,9 +48,9 @@ class NativeApp:
     """Recorded route declarations, consumed by `serve`/`serve_for_test`.
 
     Built and filled by `fulmen.Fulmen._compile_native`; not part of the
-    public API."""
+    public API. `debug` turns on §14.2 output validation."""
 
-    def __init__(self) -> None: ...
+    def __init__(self, debug: bool = False) -> None: ...
     def add_route(
         self,
         spec: tuple[
@@ -118,8 +118,10 @@ def serve_for_test(
     app: NativeApp,
     host: str = "127.0.0.1",
     uvloop: bool | None = None,
+    debug: bool = False,
 ) -> TestServer:
     """Compile `app` and serve it on an ephemeral port for tests.
 
-    `uvloop` selects the asyncio loop implementation exactly like `serve`.
+    `uvloop` selects the asyncio loop implementation exactly like `serve`;
+    `debug` turns on §14.2 output validation.
     Raises the same errors as `serve`."""

@@ -30,6 +30,7 @@ use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
 use crate::convert::{self, CallOutcome, DeferredCall, ErrorTable, JobAnswer, ParamArg, PyCtx};
+use crate::dispatch::{LaneDeps, ResponseContract};
 
 /// One unit of pool work: call `callable` with `args` and answer on
 /// `respond`.
@@ -44,6 +45,9 @@ pub(crate) struct SyncJob {
     pub(crate) label: Box<str>,
     /// When the request entered the queue (for the queue deadline).
     pub(crate) enqueued: Instant,
+    /// The route's declared response contract — picks the encode
+    /// descriptor by actual status.
+    pub(crate) contract: Arc<ResponseContract>,
     /// `-> None`/`-> NoContent` declared: `None` returns answer `204`.
     pub(crate) none_ok: bool,
     /// `false` on `on_error`-handler jobs: their failures never defer again.
@@ -85,6 +89,9 @@ struct PoolShared {
     response_cls: Arc<Py<PyAny>>,
     /// The app's `@app.on_error` table (§17).
     errors: Arc<ErrorTable>,
+    /// `Fulmen(debug=True)`/`serve(debug=…)`: every handler result is
+    /// validated against its declared response descriptor (§11.6).
+    debug: bool,
 }
 
 impl PoolShared {
@@ -129,6 +136,8 @@ impl SyncPool {
     /// `logger` and `response_cls` are cached Python objects the workers need
     /// when attached; keeping them here avoids a lookup per job.
     ///
+    /// `debug` turns on §11.6 output validation for every job the pool runs.
+    ///
     /// # Errors
     /// `io::Error` if a worker thread cannot be spawned.
     pub(crate) fn new(
@@ -136,9 +145,7 @@ impl SyncPool {
         capacity: usize,
         deadline: Duration,
         batch_size: usize,
-        logger: Arc<Py<PyAny>>,
-        response_cls: Arc<Py<PyAny>>,
-        errors: Arc<ErrorTable>,
+        deps: LaneDeps,
     ) -> io::Result<Self> {
         let shared = Arc::new(PoolShared {
             state: Mutex::new(PoolState {
@@ -150,9 +157,10 @@ impl SyncPool {
             capacity,
             deadline,
             batch_size: batch_size.max(1),
-            logger,
-            response_cls,
-            errors,
+            logger: deps.logger,
+            response_cls: deps.response_cls,
+            errors: deps.errors,
+            debug: deps.debug,
         });
         for index in 0..threads {
             let shared = Arc::clone(&shared);
@@ -284,6 +292,8 @@ fn execute_job(py: Python<'_>, shared: &PoolShared, job: &SyncJob) -> JobResult 
         none_ok: job.none_ok,
         route_errors: job.route_errors,
         label: &job.label,
+        contract: &job.contract,
+        debug: shared.debug,
     };
     match catch_unwind(AssertUnwindSafe(|| {
         convert::call_and_convert(py, &job.callable, &job.args, &ctx)
