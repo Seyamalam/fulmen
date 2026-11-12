@@ -87,6 +87,6 @@ fail_under = 80
 show_missing = true
 
 [tool.pyright]
-include = ["python/fulmen", "scripts"]
+include = ["python/fulmen", "python/tests/typing", "scripts"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
