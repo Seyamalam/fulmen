@@ -437,6 +437,8 @@ impl CheckedDecl {
             self.path.into_boxed_str(),
             decl.handler_index,
             self.params.into_boxed_slice(),
+            decl.hooks,
+            decl.errors,
         )
     }
 }
