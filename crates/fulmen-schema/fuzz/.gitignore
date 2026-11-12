@@ -1,0 +1,5 @@
+# cargo-fuzz build artifacts and crash artifacts. The seed corpus under
+# corpus/ stays committed (ROADMAP M2.19 asks for small committable seeds).
+target
+artifacts
+coverage

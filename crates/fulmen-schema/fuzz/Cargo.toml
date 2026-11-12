@@ -1,0 +1,49 @@
+# cargo-fuzz targets for fulmen-schema's untrusted-input parsers
+# (ROADMAP M2.19). Run with `just fuzz` / `just fuzz-smoke`.
+#
+# This crate is deliberately NOT a workspace member: fuzz builds need
+# nightly plus sanitizer flags the main build does not use, and its
+# dependency closure (libfuzzer-sys) must stay out of the release graph.
+[package]
+name = "fulmen-schema-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace root — detaches this crate from the repo workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fulmen-schema = { path = ".." }
+
+[[bin]]
+name = "decode_json"
+path = "fuzz_targets/decode_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_query"
+path = "fuzz_targets/decode_query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_form"
+path = "fuzz_targets/decode_form.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_and_validate"
+path = "fuzz_targets/decode_and_validate.rs"
+test = false
+doc = false
+bench = false
