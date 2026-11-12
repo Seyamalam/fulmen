@@ -3,7 +3,7 @@
 import typing
 
 from fulmen._fulmen import StartupError, __version__, native_components
-from fulmen.app import Fulmen
+from fulmen.app import HOOK_PHASES, PRIORITY_SECURITY, PRIORITY_SYSTEM, PRIORITY_USER, Fulmen
 from fulmen.constraints import (
     AfterValidator,
     Alias,
@@ -59,6 +59,7 @@ from fulmen.params import (
     Request,
     UploadFile,
 )
+from fulmen.request import Headers
 from fulmen.responses import (
     Accepted,
     Created,
@@ -88,6 +89,10 @@ def __getattr__(name: str) -> object:
 
 
 __all__ = [
+    "HOOK_PHASES",
+    "PRIORITY_SECURITY",
+    "PRIORITY_SYSTEM",
+    "PRIORITY_USER",
     "Accepted",
     "AfterValidator",
     "Alias",
@@ -114,6 +119,7 @@ __all__ = [
     "HTMLResponse",
     "HTTPError",
     "Header",
+    "Headers",
     "InternalServerError",
     "JSONResponse",
     "Len",

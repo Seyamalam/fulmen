@@ -1,11 +1,15 @@
-"""The `Fulmen` application object (DESIGN.md §5.1, §5.2, §13.3).
+"""The `Fulmen` application object (DESIGN.md §5.1, §5.2, §8, §13.3).
 
 Route decorators record `(method, path, handler, meta)` tuples; `on_error`
-registrations record `(exc_class, handler)` pairs. Nothing is inspected
-or compiled at decoration time; `run()` (or a test server via
-`Fulmen._compile_native()`) inspects each handler's signature and type
-hints — `_typing.py` turns every parameter into its source/wire-name/
-descriptor/missing spec — hands the declarations to Rust, and serves.
+registrations record `(exc_class, handler)` pairs; `add_hook` (or the
+named phase decorators) records `(phase, callable, priority)` triples —
+each scoped to the application or to a mounted sub-application (§5.5).
+Nothing is inspected or compiled at decoration time; `run()` (or a test
+server via `Fulmen._compile_native()`) inspects each handler's signature
+and type hints — `_typing.py` turns every parameter into its
+source/wire-name/descriptor/missing spec — hands the declarations to
+Rust, and serves. Compilation seals the declarations: registration APIs
+raise `RuntimeError` afterwards (§14.8).
 
 The same frozen spec trees feed `Fulmen.openapi()` — the OpenAPI 3.1
 document (§11.3, §23.2, `fulmen.openapi`) — which `_compile_native`
@@ -17,7 +21,7 @@ from __future__ import annotations
 
 import inspect
 import typing
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Unpack
 
 from fulmen import _typing
@@ -34,6 +38,27 @@ _Handler = Callable[..., object]
 
 _METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 
+# The hookable lifecycle phases (DESIGN.md §8); `route`/`extract`/`handle`/
+# `encode` are Rust-internal and `on_error` is a keyed table, not a chain.
+HOOK_PHASES: tuple[str, ...] = (
+    "on_request",
+    "before_route",
+    "guard",
+    "resolve",
+    "before_handle",
+    "after_handle",
+    "on_response",
+    "after_response",
+)
+
+# Ordering bands inside a phase — lower runs earlier (§8, §13.2). Bands
+# below `PRIORITY_USER` are reserved for native security plugins (rate
+# limit < authentication < CSRF) so security hooks precede user hooks
+# regardless of registration order.
+PRIORITY_SECURITY = 100
+PRIORITY_SYSTEM = 500
+PRIORITY_USER = 1000
+
 # One `call_args` element of a route spec (docs/SPEC-FORMAT.md §3):
 # (parameter name, source, signature kind, wire name, Descriptor|None,
 #  (missing-kind, missing-object)). `missing-kind` is "required" (absence
@@ -41,10 +66,13 @@ _METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 # object) or "factory" (call it per request).
 _CallArg = tuple[str, str, str, str, "Descriptor | None", tuple[str, object]]
 
-# A route declaration spec handed to `NativeApp.add_route`:
-# (method, path, [(path-name, "int"|"str"), ...], call_args, handler,
-#  is-async, none-ok, [(status|None, Descriptor|None), ...]). The
-# path-param list is in handler signature order — the router returns
+# A route declaration spec: (method, path,
+# [(path-name, "int"|"str"), ...], call_args, handler, is-async,
+# none-ok, [(status|None, Descriptor|None), ...]). `NativeApp.add_route`
+# receives it with one more element appended — `layers`, the route's
+# group scopes (the mounted apps it sits under), outermost first —
+# which selects which scoped hooks and `on_error` handlers apply (§8).
+# The path-param list is in handler signature order — the router returns
 # extracted values in the same order. `none-ok` means a `None` return
 # answers 204 (`-> None`/`-> NoContent` declared).
 _RouteSpec = tuple[
@@ -85,7 +113,13 @@ class Fulmen:
         "_declared",
         "_docs_url",
         "_error_handlers",
+        "_hooks",
+        "_mounted",
+        "_on_shutdown",
+        "_on_startup",
         "_openapi_url",
+        "_prefix",
+        "_sealed",
     )
 
     def __init__(
@@ -101,15 +135,26 @@ class Fulmen:
         openapi_url: str | None = "/openapi.json",
         docs_url: str | None = "/docs",
         debug: bool = False,
+        prefix: str = "",
     ) -> None:
         for name, url in (("openapi_url", openapi_url), ("docs_url", docs_url)):
             if url is not None and (not url.startswith("/") or '"' in url):
                 raise ValueError(
                     f"{name} must be None or an absolute path starting with '/', got {url!r}"
                 )
+        if prefix and (not prefix.startswith("/") or prefix.endswith("/")):
+            raise ValueError(
+                f"prefix must be empty or `/…` without a trailing slash, got {prefix!r}"
+            )
         self._debug = debug
         self._declared: list[tuple[str, str, _Handler, _openapi.OperationMeta]] = []
         self._error_handlers: list[tuple[type[BaseException], _Handler, bool]] = []
+        self._hooks: list[tuple[str, _Handler, bool, str, int]] = []
+        self._on_startup: list[tuple[_Handler, bool]] = []
+        self._on_shutdown: list[tuple[_Handler, bool]] = []
+        self._mounted: list[Fulmen] = []
+        self._prefix = prefix
+        self._sealed = False
         self._api_info = _openapi.ApiInfo(
             title=title,
             version=version,
@@ -137,6 +182,7 @@ class Fulmen:
         meta = _openapi.operation_meta(options)
 
         def decorator(handler: _Handler) -> _Handler:
+            self._check_open()
             for method in methods:
                 self._declared.append((method.upper(), path, handler, meta))
             return handler
@@ -199,10 +245,139 @@ class Fulmen:
             raise TypeError(f"on_error expects an exception class, got {exc_class!r}")
 
         def decorator(handler: _Handler) -> _Handler:
+            self._check_open()
             self._error_handlers.append((exc_class, handler, inspect.iscoroutinefunction(handler)))
             return handler
 
         return decorator
+
+    def _check_open(self) -> None:
+        """§14.8: registration closes when the app compiles."""
+        if self._sealed:
+            raise RuntimeError(
+                "application declarations are sealed — hooks, routes and "
+                "error handlers must be registered before run()/compile"
+            )
+
+    def add_hook(
+        self,
+        phase: str,
+        fn: _Handler | None = None,
+        *,
+        priority: int = PRIORITY_USER,
+    ) -> Callable[[_Handler], _Handler] | _Handler:
+        """Register `fn` in lifecycle `phase` (DESIGN.md §8).
+
+        `phase` is one of `on_request`, `before_route`, `guard`, `resolve`,
+        `before_handle`, `after_handle`, `on_response`, `after_response`.
+        Usable directly (`app.add_hook("guard", fn)`) or as a decorator
+        (`@app.add_hook("guard")`); the named methods
+        (`app.before_handle`, `app.on_response`, …) are the same thing
+        without the string.
+
+        Hooks take `(request)` — or `(request, response)` in the
+        post-handler phases (`after_handle`, `on_response`,
+        `after_response`). Returning `None` continues the pipeline,
+        returning a value short-circuits it to a response, and returning
+        a `dict` merges it into `request.state` and continues. `def`
+        hooks run on the sync pool, `async def` hooks on the asyncio
+        loop, exactly like handlers.
+
+        `priority` orders hooks inside a phase (lower runs earlier);
+        bands below `PRIORITY_USER` are reserved for security plugins.
+        Hooks declared on a mounted application run only for routes
+        under that application (§5.5).
+        """
+        if phase not in HOOK_PHASES:
+            names = ", ".join(HOOK_PHASES)
+            raise ValueError(f"unknown hook phase {phase!r} (expected one of: {names})")
+
+        def decorator(hook: _Handler) -> _Handler:
+            self._check_open()
+            name = getattr(hook, "__qualname__", "<hook>")
+            self._hooks.append((phase, hook, inspect.iscoroutinefunction(hook), name, priority))
+            return hook
+
+        return decorator(fn) if fn is not None else decorator
+
+    def on_request(self, fn: _Handler | None = None):
+        """`@app.on_request` — before any routing work (§8)."""
+        return self.add_hook("on_request", fn)
+
+    def before_route(self, fn: _Handler | None = None):
+        """`@app.before_route` — once the route is known (CORS preflight)."""
+        return self.add_hook("before_route", fn)
+
+    def guard(self, fn: _Handler | None = None):
+        """`@app.guard` — allow/deny checks (rate limit, auth, CSRF)."""
+        return self.add_hook("guard", fn)
+
+    def resolve(self, fn: _Handler | None = None):
+        """`@app.resolve` — dependency resolution (§8)."""
+        return self.add_hook("resolve", fn)
+
+    def before_handle(self, fn: _Handler | None = None):
+        """`@app.before_handle` — immediately before the handler."""
+        return self.add_hook("before_handle", fn)
+
+    def after_handle(self, fn: _Handler | None = None):
+        """`@app.after_handle` — after the handler; may replace the response."""
+        return self.add_hook("after_handle", fn)
+
+    def on_response(self, fn: _Handler | None = None):
+        """`@app.on_response` — post-encode header mutation over any response."""
+        return self.add_hook("on_response", fn)
+
+    def after_response(self, fn: _Handler | None = None):
+        """`@app.after_response` — fire-and-forget access log/metrics."""
+        return self.add_hook("after_response", fn)
+
+    def on_startup(self, fn: _Handler | None = None):
+        """`@app.on_startup` — run after a successful compile, before bind (§5.7)."""
+
+        def decorator(hook: _Handler) -> _Handler:
+            self._check_open()
+            self._on_startup.append((hook, inspect.iscoroutinefunction(hook)))
+            return hook
+
+        return decorator(fn) if fn is not None else decorator
+
+    def on_shutdown(self, fn: _Handler | None = None):
+        """`@app.on_shutdown` — run after the server stops (§5.7)."""
+
+        def decorator(hook: _Handler) -> _Handler:
+            self._check_open()
+            self._on_shutdown.append((hook, inspect.iscoroutinefunction(hook)))
+            return hook
+
+        return decorator(fn) if fn is not None else decorator
+
+    def mount(self, app: Fulmen) -> Fulmen:
+        """Mount `app` — a `Fulmen(prefix=…)` — under its prefix (§5.5).
+
+        The mounted application's routes join under its `prefix`; hooks
+        and `on_error` handlers declared on it apply only to those routes
+        (a *route group*), while app-level hooks still wrap everything.
+        Mounting is registration — it closes when this app compiles.
+        """
+        self._check_open()
+        # Runtime validation for untyped callers (pyright sees the
+        # annotation as proof enough).
+        if not isinstance(app, Fulmen):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise TypeError(f"mount expects a Fulmen application, got {type(app).__qualname__}")
+        self._mounted.append(app)
+        return app
+
+    def _walk(
+        self, prefix: str = "", scopes: tuple[Fulmen, ...] = ()
+    ) -> Iterator[tuple[Fulmen, str, tuple[Fulmen, ...]]]:
+        """Yield `(app, full_prefix, group_chain)` for this app and every
+        mounted descendant — `group_chain` is the mounted-app chain a
+        route belongs to, outermost first."""
+        base = _join_paths(prefix, self._prefix)
+        yield self, base, scopes
+        for child in self._mounted:
+            yield from child._walk(base, (*scopes, child))
 
     def run(
         self,
@@ -264,10 +439,14 @@ class Fulmen:
         raises `StartupError` here too. The returned dict is freshly
         built each call; serving renders it once at startup instead.
         """
-        specs, problems = self._route_specs()
+        # Group scopes only matter to the native declaration; the
+        # document sees the joined paths either way.
+        specs, problems = self._route_specs({id(app): 0 for app, _b, _c in self._walk()})
         if problems:
             raise _startup_error(problems)
-        return _openapi.generate(self._api_info, [_route_entry(spec, meta) for spec, meta in specs])
+        return _openapi.generate(
+            self._api_info, [_route_entry(spec, meta) for spec, meta, _layers in specs]
+        )
 
     def _compile_native(self) -> NativeApp:
         """Inspect every recorded handler and build the native declaration.
@@ -275,28 +454,49 @@ class Fulmen:
         Python-side problems (unknown parameter, bad annotation, missing
         path-param binding, uninspectable signature) are aggregated and
         raised as one `StartupError` in the same format Rust produces for
-        core compile errors.
+        core compile errors. Compiling seals the declarations (§14.8).
         """
+        self._sealed = True
         native = NativeApp(debug=self._debug)
-        specs, problems = self._route_specs()
-        for spec, _meta in specs:
-            native.add_route(spec)
-        for exc_class, handler, is_async in self._error_handlers:
-            native.add_error_handler(exc_class, handler, is_async)
+        # One group scope per mounted application; the app's own
+        # registrations stay in the application scope (`0`).
+        scope_ids: dict[int, int] = {
+            id(app): native.add_scope()
+            for walked, _base, _chain in self._walk()
+            for app in (walked,)
+            if app is not self
+        }
+        specs, problems = self._route_specs(scope_ids)
+        for spec, _meta, layers in specs:
+            native.add_route((*spec, layers))
+        for app, _base, _chain in self._walk():
+            scope = 0 if app is self else scope_ids[id(app)]
+            for phase, hook, is_async, name, priority in app._hooks:
+                native.add_hook(phase, hook, is_async, name, priority, scope)
+            for exc_class, handler, is_async in app._error_handlers:
+                native.add_error_handler(exc_class, handler, is_async, scope)
+            for hook, is_async in app._on_startup:
+                native.add_lifecycle_hook("startup", hook, is_async)
+            for hook, is_async in app._on_shutdown:
+                native.add_lifecycle_hook("shutdown", hook, is_async)
         if problems:
             raise _startup_error(problems)
-        self._serve_docs(native, specs)
+        self._serve_docs(native, [(spec, meta) for spec, meta, _layers in specs])
         return native
 
-    def _route_specs(self) -> tuple[list[tuple[_RouteSpec, _openapi.OperationMeta]], list[str]]:
-        """Every declaration inspected into its `_RouteSpec` + doc meta,
-        plus the aggregated problem list."""
-        specs: list[tuple[_RouteSpec, _openapi.OperationMeta]] = []
+    def _route_specs(
+        self, scope_ids: dict[int, int]
+    ) -> tuple[list[tuple[_RouteSpec, _openapi.OperationMeta, list[int]]], list[str]]:
+        """Every declaration inspected into its `_RouteSpec` + doc meta +
+        group layers, plus the aggregated problem list."""
+        specs: list[tuple[_RouteSpec, _openapi.OperationMeta, list[int]]] = []
         problems: list[str] = []
-        for method, path, handler, meta in self._declared:
-            spec = _inspect_handler(method, path, handler, problems)
-            if spec is not None:
-                specs.append((spec, meta))
+        for app, base, chain in self._walk():
+            layers = [scope_ids[id(group)] for group in chain]
+            for method, path, handler, meta in app._declared:
+                spec = _inspect_handler(method, _join_paths(base, path), handler, problems)
+                if spec is not None:
+                    specs.append((spec, meta, layers))
         return specs, problems
 
     def _serve_docs(
@@ -312,7 +512,11 @@ class Fulmen:
             return
         entries = [_route_entry(spec, meta) for spec, meta in specs]
         document = _openapi.render(_openapi.generate(self._api_info, entries))
-        taken = {(method, path) for method, path, _handler, _meta in self._declared}
+        taken = {
+            (method, _join_paths(base, path))
+            for app, base, _chain in self._walk()
+            for method, path, _handler, _meta in app._declared
+        }
         _add_static_route(native, taken, self._openapi_url, document, "application/json")
         if self._docs_url is None:
             return
@@ -324,6 +528,14 @@ class Fulmen:
         _add_static_route(native, taken, self._docs_url, page, "text/html; charset=utf-8")
         for path, body, content_type in _openapi.docs_assets(self._docs_url):
             _add_static_route(native, taken, path, body, content_type)
+
+
+def _join_paths(prefix: str, path: str) -> str:
+    """Join a mount prefix onto a declared route path (`"/api" + "/users"`)."""
+    if not prefix:
+        return path
+    base = prefix.rstrip("/")
+    return f"{base}{path}" if path.startswith("/") else f"{base}/{path}"
 
 
 def _startup_error(problems: list[str]) -> StartupError:
@@ -456,7 +668,7 @@ def _add_static_route(
     def handler() -> Response:
         return Response(body, content_type=content_type)
 
-    native.add_route(("GET", path, [], [], handler, False, False, [(None, None)]))
+    native.add_route(("GET", path, [], [], handler, False, False, [(None, None)], []))
 
 
 def _missing_policy(info: _typing.ParamInfo, signature: inspect.Signature) -> tuple[str, object]:

@@ -146,11 +146,7 @@ class UploadFile:
         return f"UploadFile(filename={self.filename!r}, {len(self.content)} bytes)"
 
 
-class Request:
-    """The injected request object annotation (`request: Request`).
-
-    The pipeline task (M3) wires the concrete object; declaring the
-    parameter is valid today for startup validation.
-    """
-
-    __slots__ = ()
+# The request object lives in `fulmen.request`; it is re-exported here so
+# `from fulmen.params import Request` keeps working and `Request` stays one
+# class wherever it is imported from.
+from fulmen.request import Request as Request  # noqa: E402  pylint: disable=wrong-import-position

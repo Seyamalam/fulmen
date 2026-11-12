@@ -1,8 +1,8 @@
 """`fulmen` command-line entry point.
 
-Subcommands planned for v1 (see docs/ROADMAP.md): new, dev, routes, check,
-doctor, fix, gen client, gen openapi, add. `run` (M1.22) and `info` ship
-now.
+Subcommands planned for v1 (see docs/ROADMAP.md): new, dev, check,
+doctor, fix, gen client, gen openapi, add. `run` (M1.22), `info` and
+`routes` (M3.4) ship now.
 """
 
 from __future__ import annotations
@@ -20,6 +20,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"fulmen {__version__}")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("info", help="show build information")
+
+    routes = sub.add_parser("routes", help="list declared routes, hooks and crossing costs")
+    routes.add_argument("app", help="application object, e.g. myapp.main:app")
+    routes.add_argument(
+        "--hooks",
+        action="store_true",
+        help="show each route's resolved hook chain per phase",
+    )
+    routes.add_argument(
+        "--cost",
+        action="store_true",
+        help="show the Python-crossing count per route",
+    )
 
     run = sub.add_parser("run", help="serve an application (module:attribute)")
     run.add_argument("app", help="application object, e.g. myapp.main:app")
@@ -65,7 +78,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "run":
         return _run(args)
+    if args.command == "routes":
+        return _routes(args)
     parser.print_help()
+    return 0
+
+
+def _routes(args: argparse.Namespace) -> int:
+    """Render the compiled route table — declarations, never probes (M3.4)."""
+    if "" not in sys.path:
+        sys.path.insert(0, "")
+    try:
+        app = _load_app(args.app)
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        print(f"fulmen routes: {exc}", file=sys.stderr)
+        return 2
+    try:
+        rows = app._compile_native().describe_routes()  # pyright: ignore[reportPrivateUsage] -- package-internal call
+    except StartupError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    for method, path, handler, chains, errors, cost in rows:
+        cost_note = f"  (cost: {cost} crossings)" if args.cost else ""
+        print(f"{method:<7} {path} -> {handler}{cost_note}")
+        if args.hooks:
+            for phase, name, kind in chains:
+                print(f"         {phase}: {name} ({kind})")
+            if errors:
+                print(f"         on_error: {', '.join(errors)}")
+            if not chains and not errors:
+                print("         (no hooks)")
     return 0
 
 
