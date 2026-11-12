@@ -232,15 +232,14 @@ fn apply_generic(
 
 /// `Len` bounds sanity: `min ≤ max` when both are set.
 fn check_len(len: Option<Len>, path: &[String], errs: &mut Vec<CompileError>) {
-    if let Some(l) = len {
-        if let (Some(min), Some(max)) = (l.min, l.max) {
-            if min > max {
-                errs.push(CompileError {
-                    path: path.join("/"),
-                    message: format!("Len: min ({min}) > max ({max})"),
-                });
-            }
-        }
+    if let Some(l) = len
+        && let (Some(min), Some(max)) = (l.min, l.max)
+        && min > max
+    {
+        errs.push(CompileError {
+            path: path.join("/"),
+            message: format!("Len: min ({min}) > max ({max})"),
+        });
     }
 }
 

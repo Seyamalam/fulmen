@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from types import TracebackType
+from typing import Any
 
 __version__: str
 
@@ -11,6 +12,37 @@ class StartupError(Exception):
     """Raised when an application fails to compile or bind at startup.
 
     The message lists every declaration or binding problem found."""
+
+class Descriptor:
+    """A compiled schema descriptor (docs/SPEC-FORMAT.md).
+
+    Built by `compile_descriptor` from a spec dict — `Descriptor` is not
+    directly constructible. `validate` raises
+    `fulmen.errors.ValidationError` carrying `entries` + `truncated` on
+    failure. `construct`/`validate_field` are the native halves of
+    `Model.__init__`/`Model.__setattr__`."""
+
+    @property
+    def spec(self) -> dict[str, Any]: ...
+    @property
+    def field_names(self) -> list[str]: ...
+    @property
+    def record_class(self) -> type[Any] | None: ...
+    def describe(self) -> dict[str, Any]: ...
+    def validate(
+        self,
+        obj: Any,
+        *,
+        source: str = "body",
+        lax: bool = False,
+    ) -> Any: ...
+    def construct(self, instance: Any, data: Any, *, lax: bool = False) -> None: ...
+    def validate_field(self, name: str, value: Any, *, lax: bool = False) -> Any: ...
+
+def compile_descriptor(
+    spec: dict[str, Any],
+    callbacks: list[Callable[..., Any]] | None = None,
+) -> Descriptor: ...
 
 class NativeApp:
     """Recorded route declarations, consumed by `serve`/`serve_for_test`.
@@ -25,10 +57,18 @@ class NativeApp:
             str,
             str,
             list[tuple[str, str]],
-            list[bool],
+            list[tuple[str, str, str, str, Descriptor | None, tuple[str, Any]]],
             Callable[..., object],
             bool,
+            bool,
+            list[tuple[int | None, Descriptor | None]],
         ],
+    ) -> None: ...
+    def add_error_handler(
+        self,
+        exc_class: type[BaseException],
+        handler: Callable[..., object],
+        is_async: bool,
     ) -> None: ...
 
 class AsyncPump:

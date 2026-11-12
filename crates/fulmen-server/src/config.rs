@@ -68,7 +68,7 @@ impl Default for ServerConfig {
             max_body_size: 1024 * 1024,
             header_read_timeout: Duration::from_secs(10),
             body_read_timeout: Duration::from_secs(30),
-            keep_alive_idle_timeout: Duration::from_secs(60),
+            keep_alive_idle_timeout: Duration::from_mins(1),
             max_connections: 10_000,
             shutdown_timeout: Duration::from_secs(30),
             handle_signals: true,
@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(cfg.max_body_size, 1024 * 1024);
         assert_eq!(cfg.header_read_timeout, Duration::from_secs(10));
         assert_eq!(cfg.body_read_timeout, Duration::from_secs(30));
-        assert_eq!(cfg.keep_alive_idle_timeout, Duration::from_secs(60));
+        assert_eq!(cfg.keep_alive_idle_timeout, Duration::from_mins(1));
         assert_eq!(cfg.max_connections, 10_000);
         assert_eq!(cfg.shutdown_timeout, Duration::from_secs(30));
         assert!(cfg.handle_signals);

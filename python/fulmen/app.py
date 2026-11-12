@@ -1,9 +1,11 @@
-"""The `Fulmen` application object (DESIGN.md §5.1).
+"""The `Fulmen` application object (DESIGN.md §5.1, §5.2, §13.3).
 
-Route decorators record `(method, path, handler)` tuples. Nothing is
-inspected or compiled at decoration time; `run()` (or a test server via
+Route decorators record `(method, path, handler)` tuples; `on_error`
+registrations record `(exc_class, handler)` pairs. Nothing is inspected
+or compiled at decoration time; `run()` (or a test server via
 `Fulmen._compile_native()`) inspects each handler's signature and type
-hints, hands the declarations to Rust, and serves.
+hints — `_typing.py` turns every parameter into its source/wire-name/
+descriptor/missing spec — hands the declarations to Rust, and serves.
 """
 
 from __future__ import annotations
@@ -11,28 +13,53 @@ from __future__ import annotations
 import inspect
 import typing
 from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING
 
-from fulmen._fulmen import NativeApp, StartupError
+from fulmen import _typing
+from fulmen._fulmen import NativeApp, StartupError, compile_descriptor
 from fulmen._fulmen import serve as _serve
+from fulmen.constraints import UNSET
+
+if TYPE_CHECKING:
+    from fulmen._fulmen import Descriptor
 
 _Handler = Callable[..., object]
 
 _METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 
+# One `call_args` element of a route spec (docs/SPEC-FORMAT.md §3):
+# (parameter name, source, signature kind, wire name, Descriptor|None,
+#  (missing-kind, missing-object)). `missing-kind` is "required" (absence
+# is a 422), "omit" (the signature default applies), "literal" (pass the
+# object) or "factory" (call it per request).
+_CallArg = tuple[str, str, str, str, "Descriptor | None", tuple[str, object]]
+
 # A route declaration spec handed to `NativeApp.add_route`:
-# (method, path, [(param-name, "int"|"str"), ...], [keyword-only-flag, ...],
-#  handler, is-async). The path-param list is in handler signature order —
-# the router returns extracted values in the same order.
-_RouteSpec = tuple[str, str, list[tuple[str, str]], list[bool], _Handler, bool]
+# (method, path, [(path-name, "int"|"str"), ...], call_args, handler,
+#  is-async, none-ok, [(status|None, Descriptor|None), ...]). The
+# path-param list is in handler signature order — the router returns
+# extracted values in the same order. `none-ok` means a `None` return
+# answers 204 (`-> None`/`-> NoContent` declared).
+_RouteSpec = tuple[
+    str,
+    str,
+    list[tuple[str, str]],
+    list[_CallArg],
+    _Handler,
+    bool,
+    bool,
+    list[tuple[int | None, "Descriptor | None"]],
+]
 
 
 class Fulmen:
-    """A Fulmen application: routes, then `run()` to serve."""
+    """A Fulmen application: routes and error handlers, then `run()`."""
 
-    __slots__ = ("_declared",)
+    __slots__ = ("_declared", "_error_handlers")
 
     def __init__(self) -> None:
         self._declared: list[tuple[str, str, _Handler]] = []
+        self._error_handlers: list[tuple[type[BaseException], _Handler, bool]] = []
 
     def route(
         self,
@@ -75,6 +102,25 @@ class Fulmen:
     def options(self, path: str) -> Callable[[_Handler], _Handler]:
         """Register `handler` for `OPTIONS path`."""
         return self.route(path, methods=("OPTIONS",))
+
+    def on_error(self, exc_class: object) -> Callable[[_Handler], _Handler]:
+        """Register a handler for exceptions route handlers raise (§17).
+
+        The closest registered class in the raised exception's MRO wins;
+        the handler receives the exception instance and its return value
+        is converted like a route's. A registered handler wins over the
+        built-in `application/problem+json` rendering, so `HTTPError`
+        subclasses can be re-rendered per app. An error handler that
+        itself raises answers `500` — error routing never recurses.
+        """
+        if not (isinstance(exc_class, type) and issubclass(exc_class, BaseException)):
+            raise TypeError(f"on_error expects an exception class, got {exc_class!r}")
+
+        def decorator(handler: _Handler) -> _Handler:
+            self._error_handlers.append((exc_class, handler, inspect.iscoroutinefunction(handler)))
+            return handler
+
+        return decorator
 
     def run(
         self,
@@ -139,6 +185,8 @@ class Fulmen:
             spec = _inspect_handler(method, path, handler, problems)
             if spec is not None:
                 native.add_route(spec)
+        for exc_class, handler, is_async in self._error_handlers:
+            native.add_error_handler(exc_class, handler, is_async)
         if problems:
             raise _startup_error(problems)
         return native
@@ -169,56 +217,88 @@ def _inspect_handler(
         problems.append(f"{label}: cannot resolve type hints: {exc}")
         return None
 
-    path_params = _path_param_names(path)
-    param_set = frozenset(path_params)
-    param_types: list[tuple[str, str]] = []
-    kw_flags: list[bool] = []
-    for name, parameter in signature.parameters.items():
-        if parameter.kind in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        ):
-            problems.append(
-                f"{label}: variadic parameter `{name}` is not supported; "
-                "handlers may only declare path parameters"
+    path_names = frozenset(_path_param_names(path))
+    builder = _typing.SpecBuilder()
+    infos: list[_typing.ParamInfo] = []
+    try:
+        for name, parameter in signature.parameters.items():
+            if parameter.kind in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                problems.append(
+                    f"{label}: variadic parameter `{name}` is not supported; "
+                    "handlers declare path, query, header, cookie, body or form parameters"
+                )
+                return None
+            hint = hints.get(name, inspect.Parameter.empty)
+            default = UNSET if parameter.default is inspect.Parameter.empty else parameter.default
+            infos.append(
+                _typing.param_spec(builder, name, hint, default, parameter.kind, path_names, label)
             )
-            return None
-        if name not in param_set:
-            problems.append(
-                f"{label}: parameter `{name}` is not a path parameter of `{path}`; "
-                "query and body extraction are not supported in M1"
+        variants = _typing.response_spec(builder, hints.get("return", inspect.Signature.empty))
+        response_descs: list[tuple[int | None, Descriptor | None]] = [
+            (
+                variant.status,
+                compile_descriptor(variant.body, builder.callbacks)
+                if variant.body is not None
+                else None,
             )
-            return None
-        hint = hints.get(name)
-        if hint is None:
-            type_name = "str"
-        elif hint is int:
-            type_name = "int"
-        elif hint is str:
-            type_name = "str"
-        else:
-            problems.append(
-                f"{label}: path parameter `{name}` must be annotated "
-                f"`int` or `str`, got `{_type_name(hint)}`"
-            )
-            return None
-        param_types.append((name, type_name))
-        kw_flags.append(parameter.kind is inspect.Parameter.KEYWORD_ONLY)
+            for variant in variants
+        ]
+    except ValueError as exc:
+        # `AnnotationError` (a `ValueError`) and `compile_descriptor`'s
+        # spec/compile `ValueError`s are all startup problems.
+        problems.append(str(exc))
+        return None
 
-    missing = [name for name in path_params if name not in signature.parameters]
+    path_infos = [info for info in infos if info.source == "path"]
+    missing = [name for name in path_names if name not in {info.name for info in path_infos}]
     if missing:
         joined = ", ".join(f"`{name}`" for name in missing)
         problems.append(f"{label}: path parameter(s) {joined} are not bound by the handler")
         return None
 
+    param_types = [
+        (info.name, "int" if info.spec["kind"] == "int" else "str") for info in path_infos
+    ]
+    call_args = [
+        (
+            info.name,
+            info.source,
+            info.kind,
+            info.wire_name,
+            info.descriptor,
+            _missing_policy(info, signature),
+        )
+        for info in infos
+    ]
     return (
         method,
         path,
         param_types,
-        kw_flags,
+        call_args,
         handler,
         inspect.iscoroutinefunction(handler),
+        any(variant.status == 204 for variant in variants),
+        response_descs,
     )
+
+
+def _missing_policy(info: _typing.ParamInfo, signature: inspect.Signature) -> tuple[str, object]:
+    """What an absent wire value means for `info` (§5.2): `required`
+    collects a 422; `omit` leaves the argument out so the signature's own
+    default applies; `literal`/`factory` pass a marker-declared default
+    the signature cannot express."""
+    if info.required:
+        return ("required", None)
+    if info.factory is not None:
+        return ("factory", info.factory)
+    if info.default is signature.parameters[info.name].default:
+        # The signature's own default reached `info.default` — omitting
+        # the kwarg applies exactly it (markers never overrode it).
+        return ("omit", None)
+    return ("literal", info.default)
 
 
 def _path_param_names(path: str) -> list[str]:
@@ -228,7 +308,3 @@ def _path_param_names(path: str) -> list[str]:
         for segment in path.split("/")
         if len(segment) > 2 and segment.startswith("{") and segment.endswith("}")
     ]
-
-
-def _type_name(hint: object) -> str:
-    return getattr(hint, "__qualname__", None) or str(hint)

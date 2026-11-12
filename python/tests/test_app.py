@@ -198,15 +198,22 @@ def test_bad_param_declaration_is_startup_error() -> None:
         app._compile_native()
 
 
-def test_unknown_handler_param_is_startup_error() -> None:
+def test_unmarked_scalar_param_is_a_required_query(serve: Callable[[Fulmen], str]) -> None:
+    # M2: a bare non-path scalar binds the query string — `limit` is a
+    # required query parameter (422 when absent), not a startup error.
     app = Fulmen()
 
     @app.get("/users/{user_id}")
     def user(user_id: int, limit: int) -> str:
         return f"{user_id}:{limit}"
 
-    with pytest.raises(StartupError, match=r"limit.*not a path parameter"):
-        app._compile_native()
+    base = serve(app)
+    res = fetch(f"{base}/users/5?limit=3")
+    assert res.status == 200
+    assert res.body == b"5:3"
+    res = fetch(f"{base}/users/5")
+    assert res.status == 422
+    assert res.header("Content-Type") == "application/problem+json"
 
 
 def test_keyword_only_path_param(serve: Callable[[Fulmen], str]) -> None:

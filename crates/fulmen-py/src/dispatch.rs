@@ -1,40 +1,170 @@
 //! The dispatcher: `fulmen_server::Dispatcher` implemented over the compiled
-//! route table and the sync thread pool.
+//! route table and the sync pool.
 //!
 //! The server is dumb transport; this file owns the HTTP semantics
 //! (DESIGN.md §8, §9.2): `404`/`405`+`Allow`, automatic `OPTIONS`, automatic
 //! `HEAD` (the `GET` response with its body dropped), `308` redirects under
 //! the redirect trailing-slash policy, load shedding (`503` + `Retry-After`),
-//! and the panic boundary of §14.6.
+//! and the panic boundary of §14.6. Every error answer is an RFC 9457
+//! `application/problem+json` body (§17).
+//!
+//! After routing, [`crate::extract`] builds each handler's call arguments
+//! from its `call_spec` (path/query/header/cookie/body/form) — parameter
+//! validation runs here on the I/O thread, so `4xx` answers never enter
+//! Python. A handler failure that an `@app.on_error` registration claims
+//! comes back as [`JobAnswer::Deferred`]; the dispatcher re-submits that
+//! error handler onto the matching executor with error routing disabled
+//! (a failing error handler answers `500`, it never defers again).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use fulmen_core::{CompiledApp, PathValue, RouteLookup};
+use fulmen_core::{CompiledApp, RouteLookup};
+use fulmen_schema::Validator;
+use fulmen_schema::desc::Kind;
+use fulmen_schema::errors::Source;
 use fulmen_server::{DispatchFuture, Dispatcher, Request, Response};
-use http::header::{ALLOW, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
+use http::header::{ALLOW, CONTENT_LENGTH, LOCATION};
 use http::{HeaderValue, Method, StatusCode};
 use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
 use crate::aloop::{AsyncLoop, AsyncSubmitError};
-use crate::convert::{self, ParamArg, ParamValue};
+use crate::convert::{self, ArgKind, JobAnswer, ParamArg, ParamValue};
+use crate::descriptor::Descriptor;
+use crate::extract;
 use crate::pool::{SubmitError, SyncJob, SyncPool};
 
-/// The plain-text content type used for all built-in status responses.
-const CT_TEXT: HeaderValue = HeaderValue::from_static("text/plain; charset=utf-8");
+/// Where a handler parameter's value comes from (`call_args[i].source`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallSource {
+    /// A `{name}` path segment, typed by the router.
+    Path,
+    /// A `?name=` query-string value.
+    Query,
+    /// A request header (case-insensitive wire name).
+    Header,
+    /// A `Cookie:` member.
+    Cookie,
+    /// The (JSON) request body.
+    Body,
+    /// An `application/x-www-form-urlencoded` field.
+    Form,
+}
 
-/// How a handler is invoked.
+impl CallSource {
+    /// The `call_args` source string → its `CallSource`.
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "path" => Some(Self::Path),
+            "query" => Some(Self::Query),
+            "header" => Some(Self::Header),
+            "cookie" => Some(Self::Cookie),
+            "body" => Some(Self::Body),
+            "form" => Some(Self::Form),
+            _ => None,
+        }
+    }
+
+    /// The matching `fulmen_schema` source tag for validation errors.
+    pub(crate) fn schema(self) -> Source {
+        match self {
+            Self::Path => Source::Path,
+            Self::Query => Source::Query,
+            Self::Header => Source::Header,
+            Self::Cookie => Source::Cookie,
+            Self::Body => Source::Body,
+            Self::Form => Source::Form,
+        }
+    }
+}
+
+/// What a parameter receives when its source supplies no value
+/// (`call_args[i].missing`).
 #[derive(Debug)]
-pub(crate) enum HandlerKind {
-    /// `def` — runs on the sync pool. `kw_flags` marks, per parameter in
-    /// handler signature order, which are keyword-only (passed by name).
-    Sync { kw_flags: Box<[bool]> },
-    /// `async def` — runs as a task on the asyncio loop thread (§7.4).
-    /// `kw_flags` has the same meaning as for `Sync`.
-    Async { kw_flags: Box<[bool]> },
+pub(crate) enum MissingArg {
+    /// Absence is a client error — collect a `422` `"missing"` entry.
+    Required,
+    /// Do not pass the argument — the signature's own default applies.
+    Omit,
+    /// Pass the literal default object (a marker-declared default the
+    /// signature cannot express, e.g. `Query(default=10)`).
+    Value(Arc<Py<PyAny>>),
+    /// Call the zero-arg factory per request (`default_factory`).
+    Factory(Arc<Py<PyAny>>),
+}
+
+/// A parameter's compiled schema, split so the validator is reachable
+/// without the GIL.
+#[derive(Debug)]
+pub(crate) struct ParamSchema {
+    /// The Python `Descriptor` — materialization at call time needs it.
+    pub(crate) desc: Arc<Py<Descriptor>>,
+    /// The descriptor's compiled validator, shared for GIL-free use.
+    pub(crate) validator: Arc<Validator>,
+    /// `bytes`/`Raw` kind — a `body` param taking the payload as-is.
+    pub(crate) raw_bytes: bool,
+}
+
+impl ParamSchema {
+    /// Split `desc` into the GIL-free half (validator) and the call-time
+    /// half (the `Descriptor` for materialization).
+    pub(crate) fn new(py: Python<'_>, desc: &Py<Descriptor>) -> Self {
+        let borrowed = desc.bind(py).borrow();
+        Self {
+            desc: Arc::new(desc.clone_ref(py)),
+            validator: borrowed.validator_arc(),
+            raw_bytes: matches!(borrowed.type_desc().kind, Kind::Bytes(_) | Kind::Raw),
+        }
+    }
+}
+
+/// One handler parameter's call spec, built by
+/// `python/fulmen/app.py::_inspect_handler`.
+#[derive(Debug)]
+pub(crate) struct CallSpecArg {
+    /// The signature parameter name (also the kwargs key).
+    pub(crate) name: Box<str>,
+    /// Where the value comes from.
+    pub(crate) source: CallSource,
+    /// `pos_only` → positional binding (only ever path params).
+    pub(crate) positional: bool,
+    /// The name the value is looked up by — the alias, or the header's
+    /// `x-api-key` form, or the parameter name.
+    pub(crate) wire_name: Box<str>,
+    /// The compiled descriptor, when the parameter has one.
+    pub(crate) schema: Option<ParamSchema>,
+    /// What an absent source value means.
+    pub(crate) missing: MissingArg,
+}
+
+impl CallSpecArg {
+    /// `true` for `bytes`/`Raw` body params — they take the payload
+    /// octets regardless of the content type.
+    pub(crate) fn takes_raw(&self) -> bool {
+        self.schema.as_ref().is_some_and(|s| s.raw_bytes)
+    }
+}
+
+/// One member of a handler's declared response set — `(status, body)`;
+/// `(None, None)` is the dynamic `Response` escape. Stored for the
+/// `OpenAPI` and debug-check tasks; dispatch does not read it.
+#[derive(Debug)]
+pub(crate) struct ResponseDesc {
+    /// The declared status (`None` — dynamic `Response`).
+    #[expect(
+        dead_code,
+        reason = "consumed by the M2.11 `OpenAPI` encoder, not dispatch"
+    )]
+    pub(crate) status: Option<u16>,
+    /// The declared body's descriptor, when the variant carries one.
+    #[expect(
+        dead_code,
+        reason = "consumed by the M2.11 `OpenAPI` encoder, not dispatch"
+    )]
+    pub(crate) desc: Option<Arc<Py<Descriptor>>>,
 }
 
 /// One entry in the handler table, indexed by `RouteInfo::handler_index`.
@@ -43,8 +173,18 @@ pub(crate) struct HandlerEntry {
     /// The Python callable, `Arc`-wrapped so dispatch can clone the handle
     /// without taking the GIL.
     pub(crate) callable: Arc<Py<PyAny>>,
-    /// How to call it.
-    pub(crate) kind: HandlerKind,
+    /// `async def` → the asyncio loop thread; `def` → the sync pool.
+    pub(crate) is_async: bool,
+    /// `-> None`/`-> NoContent` declared: `None` returns answer `204`.
+    pub(crate) none_ok: bool,
+    /// The parameters' extraction spec, signature order.
+    pub(crate) call_spec: Box<[CallSpecArg]>,
+    /// The declared response variants (`OpenAPI`/debug checking).
+    #[expect(
+        dead_code,
+        reason = "consumed by the M2.11 `OpenAPI` encoder, not dispatch"
+    )]
+    pub(crate) response_descs: Box<[ResponseDesc]>,
 }
 
 /// Everything one running server needs on top of the frozen route table.
@@ -102,13 +242,10 @@ impl AppInner {
     /// routing runs under [`catch_unwind`], handler calls are isolated on
     /// the pool (§14.6), and every lookup uses checked access.
     async fn handle(&self, request: Request) -> Response {
-        let method = request.method;
+        let method = request.method.clone();
         let path = request.uri.path().to_owned();
-        let query = request.uri.query().map(str::to_owned);
 
-        let resolved = catch_unwind(AssertUnwindSafe(|| {
-            self.resolve(&method, &path, query.as_deref())
-        }));
+        let resolved = catch_unwind(AssertUnwindSafe(|| self.resolve(&request)));
         let Ok(action) = resolved else {
             log_message(&self.logger, format!("router panicked on {method} {path}"));
             return convert::internal_error();
@@ -131,10 +268,7 @@ impl AppInner {
             return convert::internal_error();
         };
 
-        let mut response = match &entry.kind {
-            HandlerKind::Sync { .. } => self.dispatch_sync(entry, args, method, path).await,
-            HandlerKind::Async { .. } => self.dispatch_async(entry, args, method, path).await,
-        };
+        let mut response = self.run(entry, args, method, path).await;
 
         if implicit_head {
             // §9.2: headers of the GET response, no body. Content-Length
@@ -151,30 +285,24 @@ impl AppInner {
 
     /// Turn the route lookup into an owned [`Action`] (runs under
     /// `catch_unwind` by the caller).
-    fn resolve(&self, method: &Method, path: &str, query: Option<&str>) -> Action {
-        match self.app.route(method, path) {
+    fn resolve(&self, request: &Request) -> Action {
+        match self.app.route(&request.method, request.uri.path()) {
             RouteLookup::Hit(hit) => {
                 let info = self.app.route_info(hit.route);
-                let args: Box<[ParamArg]> = hit
-                    .params
-                    .iter()
-                    .map(|p| ParamArg {
-                        name: p.name.to_owned(),
-                        keyword_only: false, // filled in by dispatch_sync
-                        value: match &p.value {
-                            PathValue::Int(i) => ParamValue::Int(*i),
-                            PathValue::Str(s) => ParamValue::Str(s.to_string()),
-                        },
-                    })
-                    .collect();
-                Action::Call {
-                    index: info.handler_index(),
-                    args,
-                    implicit_head: hit.implicit_head,
+                let Some(entry) = self.handlers.get(info.handler_index() as usize) else {
+                    return Action::Reply(convert::internal_error());
+                };
+                match extract::extract_args(&hit, &entry.call_spec, request) {
+                    extract::Extracted::Call(args) => Action::Call {
+                        index: info.handler_index(),
+                        args,
+                        implicit_head: hit.implicit_head,
+                    },
+                    extract::Extracted::Reply(response) => Action::Reply(response),
                 }
             }
             RouteLookup::Redirect(target) => {
-                let location = match query {
+                let location = match request.uri.query() {
                     Some(q) => format!("{target}?{q}"),
                     None => target,
                 };
@@ -186,114 +314,127 @@ impl AppInner {
             }
             RouteLookup::MethodNotAllowed(allow) => {
                 let allow = allow.header();
-                let mut response = if method == Method::OPTIONS {
+                let mut response = if request.method == Method::OPTIONS {
                     // §9.2: automatic OPTIONS answers with the Allow set.
                     Response::status(StatusCode::NO_CONTENT)
                 } else {
-                    let mut response = Response::status(StatusCode::METHOD_NOT_ALLOWED);
-                    response.headers.insert(CONTENT_TYPE, CT_TEXT);
-                    response.body = Bytes::from_static(b"Method Not Allowed");
-                    response
+                    convert::problem_response(
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "about:blank",
+                        "Method Not Allowed",
+                        None,
+                        None,
+                    )
                 };
                 if let Ok(value) = HeaderValue::from_str(&allow) {
                     response.headers.insert(ALLOW, value);
                 }
                 Action::Reply(response)
             }
-            RouteLookup::NotFound => {
-                let mut response = Response::status(StatusCode::NOT_FOUND);
-                response.headers.insert(CONTENT_TYPE, CT_TEXT);
-                response.body = Bytes::from_static(b"Not Found");
-                Action::Reply(response)
+            RouteLookup::NotFound => Action::Reply(convert::problem_response(
+                StatusCode::NOT_FOUND,
+                "about:blank",
+                "Not Found",
+                None,
+                None,
+            )),
+        }
+    }
+
+    /// Submit `args` to the handler's executor and await the answer — then
+    /// keep re-submitting while the answer defers to an `on_error`
+    /// handler (§17). A deferred call always returns a `Response`: its
+    /// own failures never defer again (`route_errors = false`).
+    async fn run(
+        &self,
+        entry: &HandlerEntry,
+        args: Box<[ParamArg]>,
+        method: Method,
+        path: String,
+    ) -> Response {
+        let mut answer = self
+            .submit(
+                entry.is_async,
+                &entry.callable,
+                args,
+                format!("{method} {path}").into_boxed_str(),
+                entry.none_ok,
+                true,
+            )
+            .await;
+        loop {
+            match answer {
+                JobAnswer::Response(response) => return response,
+                JobAnswer::Deferred(call) => {
+                    let args = Box::new([ParamArg {
+                        name: "exc".to_owned(),
+                        kind: ArgKind::Positional,
+                        value: ParamValue::Obj(call.arg),
+                    }]);
+                    answer = self
+                        .submit(
+                            call.is_async,
+                            &call.callable,
+                            args,
+                            call.label,
+                            false,
+                            false,
+                        )
+                        .await;
+                }
             }
         }
     }
 
-    /// Submit the call to the sync pool and await the oneshot.
-    async fn dispatch_sync(
+    /// Put one call on the sync pool or the asyncio loop and await the
+    /// job's oneshot. `none_ok`/`route_errors` ride the job (a deferred
+    /// `on_error` call always submits with both `false`).
+    async fn submit(
         &self,
-        entry: &HandlerEntry,
+        is_async: bool,
+        callable: &Arc<Py<PyAny>>,
         args: Box<[ParamArg]>,
-        method: Method,
-        path: String,
-    ) -> Response {
-        let HandlerKind::Sync { kw_flags } = &entry.kind else {
-            return convert::internal_error();
-        };
-        let mut args = Vec::from(args);
-        if !apply_kw_flags(&mut args, kw_flags) {
-            log_message(
-                &self.logger,
-                format!("{method} {path}: parameter spec does not match the signature"),
-            );
-            return convert::internal_error();
-        }
-        let (tx, rx) = oneshot::channel();
-        let job = SyncJob {
-            callable: Arc::clone(&entry.callable),
-            args: args.into_boxed_slice(),
-            label: format!("{method} {path}").into_boxed_str(),
-            enqueued: Instant::now(),
-            respond: tx,
-        };
-        match self.pool.try_submit(job) {
-            Ok(()) => rx.await.unwrap_or_else(|_| convert::internal_error()),
-            Err(SubmitError::Full) => convert::service_unavailable(),
-        }
-    }
-
-    /// Submit the coroutine to the asyncio loop thread and await the
-    /// completion oneshot (§7.4, D4). The bridge answers `503` on a full
-    /// queue and `500` when the loop is gone.
-    async fn dispatch_async(
-        &self,
-        entry: &HandlerEntry,
-        args: Box<[ParamArg]>,
-        method: Method,
-        path: String,
-    ) -> Response {
-        let HandlerKind::Async { kw_flags } = &entry.kind else {
-            return convert::internal_error();
-        };
-        let mut args = Vec::from(args);
-        if !apply_kw_flags(&mut args, kw_flags) {
-            log_message(
-                &self.logger,
-                format!("{method} {path}: parameter spec does not match the signature"),
-            );
-            return convert::internal_error();
-        }
-        let Some(loop_thread) = &self.async_loop else {
-            log_message(
-                &self.logger,
-                format!("{method} {path}: async handler has no loop thread"),
-            );
-            return convert::internal_error();
-        };
-        let (tx, rx) = oneshot::channel();
-        match loop_thread.submit(
-            Arc::clone(&entry.callable),
-            args.into_boxed_slice(),
-            format!("{method} {path}").into_boxed_str(),
-            tx,
-        ) {
-            Ok(()) => rx.await.unwrap_or_else(|_| convert::internal_error()),
-            Err(AsyncSubmitError::Full) => convert::service_unavailable(),
-            Err(AsyncSubmitError::Unavailable) => convert::internal_error(),
+        label: Box<str>,
+        none_ok: bool,
+        route_errors: bool,
+    ) -> JobAnswer {
+        if is_async {
+            let Some(loop_thread) = &self.async_loop else {
+                log_message(
+                    &self.logger,
+                    format!("{label}: async job has no loop thread"),
+                );
+                return JobAnswer::Response(convert::internal_error());
+            };
+            let (tx, rx) = oneshot::channel();
+            match loop_thread.submit(Arc::clone(callable), args, label, none_ok, route_errors, tx) {
+                Ok(()) => rx
+                    .await
+                    .unwrap_or_else(|_| JobAnswer::Response(convert::internal_error())),
+                Err(AsyncSubmitError::Full) => JobAnswer::Response(convert::service_unavailable()),
+                Err(AsyncSubmitError::Unavailable) => {
+                    JobAnswer::Response(convert::internal_error())
+                }
+            }
+        } else {
+            let (tx, rx) = oneshot::channel();
+            let job = SyncJob {
+                callable: Arc::clone(callable),
+                args,
+                label,
+                enqueued: Instant::now(),
+                none_ok,
+                route_errors,
+                respond: tx,
+            };
+            match self.pool.try_submit(job) {
+                Ok(()) => rx
+                    .await
+                    .unwrap_or_else(|_| JobAnswer::Response(convert::internal_error())),
+                Err(SubmitError::Full) => JobAnswer::Response(convert::service_unavailable()),
+            }
         }
     }
-}
-
-/// Apply `kw_flags` to the call arguments (signature order). `false` when
-/// the counts disagree — a bridge bug, not a user error.
-fn apply_kw_flags(args: &mut [ParamArg], kw_flags: &[bool]) -> bool {
-    if args.len() != kw_flags.len() {
-        return false;
-    }
-    for (arg, kw) in args.iter_mut().zip(kw_flags.iter()) {
-        arg.keyword_only = *kw;
-    }
-    true
 }
 
 /// Log a message through the `fulmen` logger; attaches briefly and stays

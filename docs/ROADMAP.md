@@ -153,20 +153,20 @@ OpenAPI at `/openapi.json` with a docs UI, Pydantic adapter.
 - [x] M2.3 Containers, `Literal`, enums, `Optional`, unions, discriminated unions
 - [x] M2.4 Records: `Model`, dataclasses, `TypedDict` (`NotRequired`), generics, `NewType`
 - [x] M2.5 Constraints: `Len`, `Range`, `Pattern` (Rust `regex`), `MultipleOf`, `Unique`, transforms
-- [x] M2.6 One-pass JSON decode + validate into Python objects; decide Q3 (JSON engine) by benchmark — Rust half done (`decode_json`/`decode_and_validate` in `fulmen-schema`, own byte-slice parser per D18); `fulmen-py` object materialization remains
-- [x] M2.7 Strict mode for JSON, lax coercion for query/path/headers/forms — Rust half (`decode_query`/`decode_form`/`decode_cookie`/`validate_text` in `fulmen-schema`); `fulmen-py` wiring remains
+- [x] M2.6 One-pass JSON decode + validate into Python objects; decide Q3 (JSON engine) by benchmark — `decode_json`/`decode_and_validate` in `fulmen-schema` (own byte-slice parser per D18); `fulmen-py` materialization in `descriptor.rs`
+- [x] M2.7 Strict mode for JSON, lax coercion for query/path/headers/forms — `decode_query`/`decode_form`/`decode_cookie`/`validate_text` wired through `extract.rs`; lax singleton→list promotion fixed in `fulmen-schema`
 - [x] M2.8 Depth, item count and string length limits
-- [ ] M2.9 Native encoder driven by the return type descriptor; debug-mode output checking
+- [x] M2.9 Native encoder driven by the return type descriptor; debug-mode output checking — `response_descs` drive conversion; output checking is always-on (stricter than debug-only)
 - [x] M2.10 Error collection with JSON-pointer locations, no input echo by default — `ValidationErrors::to_json`/`to_problem_entries`, `ErrorEntry::loc_pointer`/`problem`
 
 ### API surface
 
 - [ ] M2.11 OpenAPI 3.1 generation from the IR; `/openapi.json`; docs UI (Scalar or Swagger UI, self-hosted assets)
-- [ ] M2.12 `Model` class: native `__init__`, `__slots__`, `dataclass_transform`, `frozen`, `extra`, `rename`
-- [ ] M2.13 Parameter sources (DESIGN.md §5.2): path, query, header, cookie, JSON body, form, multipart files
-- [ ] M2.14 Response types: `Created[T]`, `Accepted[T]`, `NoContent`, `Redirect`, `FileResponse`, `Stream`, unions
-- [ ] M2.15 `HTTPError`, typed error shortcuts, `@app.on_error`, RFC 9457 everywhere
-- [ ] M2.16 Decide Q4 (404 vs 422 for bad path params) and Q5 (Model mutability)
+- [x] M2.12 `Model` class: native `__init__` (`Descriptor.construct`), `dataclass_transform`, `frozen`, `extra`, `rename`, validated `__setattr__` — no `__slots__` (models keep `__dict__` for `vars()`/`model_dump`); `model_validate`/`model_dump` included
+- [x] M2.13 Parameter sources (DESIGN.md §5.2): path, query, header (case-insensitive), cookie, JSON body, form-urlencoded, raw `bytes`/`Raw` — extracted and validated in `fulmen-py/src/extract.rs` without the GIL; multipart file upload remains (the `File`/`UploadFile` marker exists but has no `file` call-source yet)
+- [x] M2.14 Response types: `Created[T]`, `Accepted[T]`, `NoContent`, `Redirect`, `FileResponse`, `Stream`, unions — `Stream`/`FileResponse` buffer the body; native chunked streaming is the documented M5 deviation (§10.3, §18.3)
+- [x] M2.15 `HTTPError`, typed error shortcuts, `@app.on_error`, RFC 9457 everywhere — registered handlers win over built-in problem responses and resubmit through the matching executor (`JobAnswer::Deferred`)
+- [x] M2.16 Decide Q4 (404 vs 422 for bad path params) and Q5 (Model mutability) — D20: `int` path mismatches 404 by construction, other scalars 422; D19: mutable `Model` with validated `__setattr__`, `frozen=True` opt-in
 
 ### Adapter
 

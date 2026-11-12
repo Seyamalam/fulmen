@@ -51,6 +51,42 @@ exists. Move the `Unreleased` entries under the new version heading first.
   JSON-pointer locations (`/body/address/city`, `/query/page`), no input
   echo, a `MAX_ERRORS` cap, and `max_depth`/`max_items` guardrails.
   Dependency-light: `regex` only; no `unsafe`, no I/O, no GIL.
+- Typed parameter pipeline and error routing (M2.12–M2.16): handler
+  signatures compile at startup into a native route spec
+  (`SPEC-FORMAT.md`), and `fulmen-py` now extracts, validates and
+  materializes every parameter source without the GIL — path, query
+  (`decode_query`), header (case-insensitive `validate_text`), cookie
+  (`decode_cookie`), form (`decode_form`) and strict JSON body
+  (`decode_and_validate`). Missing required params collect into a 422
+  `application/problem+json` `errors` array with `["query", "page"]`-style
+  locations; omitted optional params let Python signature defaults apply;
+  marker/`Field` defaults pass literally or per-request factories.
+  Content-Type routing: `application/json` decodes the body,
+  `application/x-www-form-urlencoded` takes the form path, other types
+  415 when a body param exists; malformed JSON is 400, schema violations
+  422. `Model` gets a native `__init__` via `Descriptor.construct`, a
+  validated `__setattr__` (mutable by default, `frozen=True` opt-in —
+  Q5 → D19), `model_validate`/`model_dump`. Response classes complete:
+  `Created`, `Accepted`, `NoContent`, `Redirect`, `FileResponse` and
+  buffered `Stream` (native chunked streaming is the documented M5
+  deviation, §10.3/§18.3); union returns (`X | Y`) ride `response_descs`.
+  `HTTPError` typed shortcuts (`NotFound[Problem]` et al.) plus
+  `@app.on_error` — the closest registered class in the MRO wins and its
+  handler resubmits through the matching executor with error routing
+  disabled (`JobAnswer::Deferred`). Path-param `int` mismatches stay 404
+  by construction, other scalars 422 (Q4 → D20). Pyright strict clean;
+  `_fulmen.pyi` documents every new `#[pyfunction]`/`#[pyclass]`.
+
+### Fixed
+
+- `fulmen-schema` lax singleton→container promotion returned the scalar
+  instead of the one-element array (`Outcome::Same` on a non-array
+  input), producing a 500 "internal error" on e.g. `?tag=a` for
+  `Query[list[str]]` — now always emits `New(Array)`.
+- `TypedDict` `Required`/`NotRequired` misreported under
+  `from __future__ import annotations` (`__required_keys__` marks every
+  key required under PEP 563) — `_typed_dict_spec` reads the qualifier
+  off the resolved hint and falls back to `__total__`.
 
 ## [0.1.0] - 2026-11-11
 

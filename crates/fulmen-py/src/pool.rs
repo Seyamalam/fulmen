@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
-use crate::convert::{self, CallOutcome, ParamArg, PyCtx};
+use crate::convert::{self, CallOutcome, DeferredCall, ErrorTable, JobAnswer, ParamArg, PyCtx};
 
 /// One unit of pool work: call `callable` with `args` and answer on
 /// `respond`.
@@ -44,8 +44,12 @@ pub(crate) struct SyncJob {
     pub(crate) label: Box<str>,
     /// When the request entered the queue (for the queue deadline).
     pub(crate) enqueued: Instant,
-    /// Completes with the wire response.
-    pub(crate) respond: oneshot::Sender<fulmen_server::Response>,
+    /// `-> None`/`-> NoContent` declared: `None` returns answer `204`.
+    pub(crate) none_ok: bool,
+    /// `false` on `on_error`-handler jobs: their failures never defer again.
+    pub(crate) route_errors: bool,
+    /// Completes with the wire response or a deferred `on_error` call.
+    pub(crate) respond: oneshot::Sender<JobAnswer>,
 }
 
 /// Internal result of running one job.
@@ -54,6 +58,9 @@ enum JobResult {
     Return(convert::PyReturn),
     /// The job waited past the queue deadline; answer 503 without calling.
     Overdue,
+    /// The handler raised an exception the `on_error` table claims — the
+    /// dispatcher re-submits the error handler onto its own executor.
+    Deferred(DeferredCall),
     /// The call failed and was logged (or the interpreter is gone).
     Failed,
 }
@@ -76,6 +83,8 @@ struct PoolShared {
     batch_size: usize,
     logger: Arc<Py<PyAny>>,
     response_cls: Arc<Py<PyAny>>,
+    /// The app's `@app.on_error` table (§17).
+    errors: Arc<ErrorTable>,
 }
 
 impl PoolShared {
@@ -129,6 +138,7 @@ impl SyncPool {
         batch_size: usize,
         logger: Arc<Py<PyAny>>,
         response_cls: Arc<Py<PyAny>>,
+        errors: Arc<ErrorTable>,
     ) -> io::Result<Self> {
         let shared = Arc::new(PoolShared {
             state: Mutex::new(PoolState {
@@ -142,6 +152,7 @@ impl SyncPool {
             batch_size: batch_size.max(1),
             logger,
             response_cls,
+            errors,
         });
         for index in 0..threads {
             let shared = Arc::clone(&shared);
@@ -249,12 +260,13 @@ fn run_jobs(shared: &PoolShared, jobs: Vec<SyncJob>) {
         return;
     };
     for (job, result) in outcomes.drain(..) {
-        let response = match result {
-            JobResult::Return(ret) => convert::into_response(ret),
-            JobResult::Overdue => convert::service_unavailable(),
-            JobResult::Failed => convert::internal_error(),
+        let answer = match result {
+            JobResult::Return(ret) => JobAnswer::Response(convert::into_response(ret)),
+            JobResult::Overdue => JobAnswer::Response(convert::service_unavailable()),
+            JobResult::Deferred(call) => JobAnswer::Deferred(call),
+            JobResult::Failed => JobAnswer::Response(convert::internal_error()),
         };
-        let _ = job.respond.send(response);
+        let _ = job.respond.send(answer);
     }
 }
 
@@ -268,12 +280,16 @@ fn execute_job(py: Python<'_>, shared: &PoolShared, job: &SyncJob) -> JobResult 
     let ctx = PyCtx {
         logger: &shared.logger,
         response_cls: &shared.response_cls,
+        errors: &shared.errors,
+        none_ok: job.none_ok,
+        route_errors: job.route_errors,
         label: &job.label,
     };
     match catch_unwind(AssertUnwindSafe(|| {
         convert::call_and_convert(py, &job.callable, &job.args, &ctx)
     })) {
         Ok(CallOutcome::Return(ret)) => JobResult::Return(ret),
+        Ok(CallOutcome::Deferred(call)) => JobResult::Deferred(call),
         Ok(CallOutcome::Failed) => JobResult::Failed,
         Err(payload) => {
             // A panic here is a bug in the bridge, not in user code.

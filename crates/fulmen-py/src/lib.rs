@@ -22,7 +22,9 @@ use pyo3::prelude::*;
 mod aloop;
 mod app;
 mod convert;
+mod descriptor;
 mod dispatch;
+mod extract;
 mod json;
 mod pool;
 mod serve;
@@ -40,9 +42,14 @@ mod _fulmen {
             m.py().get_type::<crate::app::StartupError>(),
         )?;
         m.add_class::<crate::app::NativeApp>()?;
+        m.add_class::<crate::descriptor::Descriptor>()?;
         m.add_class::<crate::serve::TestServer>()?;
         m.add_function(pyo3::wrap_pyfunction!(crate::serve::serve, m)?)?;
         m.add_function(pyo3::wrap_pyfunction!(crate::serve::serve_for_test, m)?)?;
+        m.add_function(pyo3::wrap_pyfunction!(
+            crate::descriptor::compile_descriptor,
+            m
+        )?)?;
         Ok(())
     }
 

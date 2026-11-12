@@ -397,14 +397,14 @@ impl VNode {
             _ => {}
         }
         // Transforms on a `Str` input run before any type/constraint check.
-        if self.transforms.any() {
-            if let Value::Str(s) = input {
-                let local = Value::Str(Cow::Owned(self.transforms.apply(s).into_owned()));
-                return self.kind.check(&local, ctx).map(|o| match o {
-                    Outcome::Same => Outcome::New(local),
-                    Outcome::New(v) => Outcome::New(v),
-                });
-            }
+        if self.transforms.any()
+            && let Value::Str(s) = input
+        {
+            let local = Value::Str(Cow::Owned(self.transforms.apply(s).into_owned()));
+            return self.kind.check(&local, ctx).map(|o| match o {
+                Outcome::Same => Outcome::New(local),
+                Outcome::New(v) => Outcome::New(v),
+            });
         }
         self.kind.check(input, ctx)
     }
@@ -416,25 +416,25 @@ fn check_len(len: Option<Len>, n: usize, unit: &str, ctx: &mut Ctx<'_>) -> bool 
     let Some(l) = len else { return true };
     let n = n as u64;
     let mut ok = true;
-    if let Some(min) = l.min {
-        if n < min {
-            ctx.err(
-                ErrorCode::MinLen,
-                format!("must have at least {min} {unit}"),
-                Some(LiteralValue::UInt(min)),
-            );
-            ok = false;
-        }
+    if let Some(min) = l.min
+        && n < min
+    {
+        ctx.err(
+            ErrorCode::MinLen,
+            format!("must have at least {min} {unit}"),
+            Some(LiteralValue::UInt(min)),
+        );
+        ok = false;
     }
-    if let Some(max) = l.max {
-        if n > max {
-            ctx.err(
-                ErrorCode::MaxLen,
-                format!("must have at most {max} {unit}"),
-                Some(LiteralValue::UInt(max)),
-            );
-            ok = false;
-        }
+    if let Some(max) = l.max
+        && n > max
+    {
+        ctx.err(
+            ErrorCode::MaxLen,
+            format!("must have at most {max} {unit}"),
+            Some(LiteralValue::UInt(max)),
+        );
+        ok = false;
     }
     ok
 }
@@ -447,15 +447,15 @@ fn check_numeric(n: &LitNum, d: &IntV, ctx: &mut Ctx<'_>) -> bool {
         use std::cmp::Ordering;
         let mut bound =
             |bound: &Option<LitNum>, fails: fn(Ordering) -> bool, code: ErrorCode, sym: &str| {
-                if let Some(b) = bound {
-                    if fails(n.cmp(b)) {
-                        ctx.err(
-                            code,
-                            format!("must be {sym} {}", b.wire_text()),
-                            Some(b.wire_literal()),
-                        );
-                        ok = false;
-                    }
+                if let Some(b) = bound
+                    && fails(n.cmp(b))
+                {
+                    ctx.err(
+                        code,
+                        format!("must be {sym} {}", b.wire_text()),
+                        Some(b.wire_literal()),
+                    );
+                    ok = false;
                 }
             };
         bound(&r.ge, |o| o == Ordering::Less, ErrorCode::Ge, ">=");
@@ -463,15 +463,15 @@ fn check_numeric(n: &LitNum, d: &IntV, ctx: &mut Ctx<'_>) -> bool {
         bound(&r.le, |o| o == Ordering::Greater, ErrorCode::Le, "<=");
         bound(&r.lt, |o| o != Ordering::Less, ErrorCode::Lt, "<");
     }
-    if let Some(m) = &d.multiple {
-        if !n.is_multiple_of(m) {
-            ctx.err(
-                ErrorCode::MultipleOf,
-                format!("must be a multiple of {}", m.wire_text()),
-                Some(m.wire_literal()),
-            );
-            ok = false;
-        }
+    if let Some(m) = &d.multiple
+        && !n.is_multiple_of(m)
+    {
+        ctx.err(
+            ErrorCode::MultipleOf,
+            format!("must be a multiple of {}", m.wire_text()),
+            Some(m.wire_literal()),
+        );
+        ok = false;
     }
     ok
 }
@@ -618,15 +618,15 @@ fn check_float<'v>(input: &Value<'v>, d: &IntV, ctx: &mut Ctx<'_>) -> Option<Out
 fn check_str<'v>(input: &Value<'v>, d: &StrV, ctx: &mut Ctx<'_>) -> Option<Outcome<'v>> {
     if let Value::Str(s) = input {
         let mut ok = check_len(d.len, s.chars().count(), "characters", ctx);
-        if let Some(p) = &d.pattern {
-            if !p.is_match(s) {
-                ctx.err(
-                    ErrorCode::Pattern,
-                    format!("does not match pattern {:?}", p.source()),
-                    None,
-                );
-                ok = false;
-            }
+        if let Some(p) = &d.pattern
+            && !p.is_match(s)
+        {
+            ctx.err(
+                ErrorCode::Pattern,
+                format!("does not match pattern {:?}", p.source()),
+                None,
+            );
+            ok = false;
         }
         if ok { Some(Outcome::Same) } else { None }
     } else {
@@ -863,10 +863,10 @@ fn validate_items<'v>(
     unique: bool,
     ctx: &mut Ctx<'_>,
 ) -> Option<Outcome<'v>> {
-    let items: &[Value<'v>] = match input {
-        Value::Array(items) => items,
+    let (items, scalar_wrapped): (&[Value<'v>], bool) = match input {
+        Value::Array(items) => (items, false),
         // Lax promotion: a lone scalar is a one-element container.
-        _ if ctx.mode == Mode::Lax => std::slice::from_ref(input),
+        _ if ctx.mode == Mode::Lax => (std::slice::from_ref(input), true),
         _ => {
             ctx.type_err("array", input);
             return None;
@@ -914,7 +914,7 @@ fn validate_items<'v>(
             }
         }
     }
-    if all_same && out.len() == items.len() {
+    if all_same && !scalar_wrapped && out.len() == items.len() {
         Some(Outcome::Same)
     } else {
         Some(Outcome::New(Value::Array(out)))
