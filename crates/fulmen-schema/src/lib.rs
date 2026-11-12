@@ -20,6 +20,8 @@
 //!   indexed fields/tags/literals, generics substituted).
 //! - [`json`] — the one-pass byte-slice JSON decoder (D18): strict
 //!   RFC 8259, borrowed strings, limits enforced mid-walk.
+//! - [`encode`] — the §11.6 output half: a wire-shaped `Value` back to
+//!   JSON bytes in one pass (`Bytes` members base64).
 //! - [`sources`] — lax source adapters: query string, form-urlencoded
 //!   bodies and the `Cookie` header into `Value`s, plus
 //!   [`validate_text`] for single path/header/cookie values.
@@ -36,6 +38,7 @@ pub const NAME: &str = "schema";
 
 pub mod compile;
 pub mod desc;
+pub mod encode;
 pub mod errors;
 pub mod json;
 mod num;
@@ -52,6 +55,7 @@ pub use desc::{
     SetDesc, StrDesc, Transforms, TupleFixedDesc, TupleVarDesc, TypeDesc, TypeMeta, TypeMetaRef,
     UnionDesc,
 };
+pub use encode::encode_json;
 pub use errors::{
     ErrorCode, ErrorEntry, LocSeg, MAX_ERRORS, ProblemEntry, Source, ValidationErrors,
 };
