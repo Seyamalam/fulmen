@@ -148,7 +148,7 @@ OpenAPI at `/openapi.json` with a docs UI, Pydantic adapter.
 
 ### Schema engine (`fulmen-schema`)
 
-- [ ] M2.1 Type descriptor IR (DESIGN.md §11.3) and its conversion from Python types in `fulmen-py` — Rust half done (`TypeDesc` IR + `compile()` in `fulmen-schema`); `fulmen-py` converter remains
+- [x] M2.1 Type descriptor IR (DESIGN.md §11.3) and its conversion from Python types in `fulmen-py` — `TypeDesc` IR + `compile()` in `fulmen-schema`; `_typing.py` annotation→spec + `compile_descriptor`/`Descriptor` in `fulmen-py` (docs/SPEC-FORMAT.md)
 - [x] M2.2 Validators for scalars, time types, identifiers (`UUID`, `Email`, `Url`, IP)
 - [x] M2.3 Containers, `Literal`, enums, `Optional`, unions, discriminated unions
 - [x] M2.4 Records: `Model`, dataclasses, `TypedDict` (`NotRequired`), generics, `NewType`

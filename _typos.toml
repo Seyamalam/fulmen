@@ -1,5 +1,12 @@
 [files]
-extend-exclude = ["LICENSE", "Cargo.lock", "target/", ".venv/"]
+extend-exclude = [
+    "LICENSE",
+    "Cargo.lock",
+    "target/",
+    ".venv/",
+    "crates/fulmen-schema/fuzz/corpus/",
+    "crates/fulmen-schema/fuzz/artifacts/",
+]
 
 [default.extend-words]
 fulmen = "fulmen"
