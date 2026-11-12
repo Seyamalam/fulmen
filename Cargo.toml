@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "benches/micro"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.96"
 license = "Apache-2.0"
@@ -12,10 +12,10 @@ repository = "https://github.com/Seyamalam/fulmen"
 homepage = "https://github.com/Seyamalam/fulmen"
 
 [workspace.dependencies]
-fulmen-core = { path = "crates/fulmen-core", version = "0.1.0" }
-fulmen-schema = { path = "crates/fulmen-schema", version = "0.1.0" }
-fulmen-security = { path = "crates/fulmen-security", version = "0.1.0" }
-fulmen-server = { path = "crates/fulmen-server", version = "0.1.0" }
+fulmen-core = { path = "crates/fulmen-core", version = "0.2.0" }
+fulmen-schema = { path = "crates/fulmen-schema", version = "0.2.0" }
+fulmen-security = { path = "crates/fulmen-security", version = "0.2.0" }
+fulmen-server = { path = "crates/fulmen-server", version = "0.2.0" }
 pyo3 = "0.29.0"
 # Router tree (DESIGN.md D3) and HTTP method types shared with the server.
 matchit = "0.9.2"
