@@ -171,7 +171,9 @@ def test_field_factory_default_is_per_request(serve: Callable[[Fulmen], str]) ->
     app = Fulmen()
 
     @app.get("/ft")
-    def ft(tag: Annotated[list[str], Query()] = Field(default_factory=list)) -> dict:
+    def ft(
+        tag: Annotated[list[str], Query()] = Field(default_factory=list),  # noqa: B008 - the marker API
+    ) -> dict:
         tag.append("got")
         return {"tag": tag}
 

@@ -298,7 +298,7 @@ class SpecBuilder:
     def _enum_spec(self, cls: enum.EnumMeta) -> dict[str, Any]:
         flavor = "int" if issubclass(cls, int) else ("str" if issubclass(cls, str) else "plain")
         members = [
-            {"name": name, "value": _literal_spec(member.value)}
+            {"name": name, "value": _literal_spec(typing.cast(enum.Enum, member).value)}
             for name, member in cls.__members__.items()
         ]
         return {
