@@ -8,7 +8,7 @@ use fulmen_server::ServerConfig;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::app::{BridgeConfig, NativeApp, compile_app, dispatcher};
+use crate::app::{BridgeConfig, LifecycleHook, NativeApp, compile_app, dispatcher};
 use crate::convert::log_message;
 
 /// Compile `app` and serve it until the process is signalled (SIGINT/SIGTERM
@@ -53,6 +53,9 @@ pub(crate) fn serve(
     let logger = std::sync::Arc::clone(&compiled.inner.logger);
     drop(native);
 
+    // §5.7: `on_startup` fires after a successful compile, before bind.
+    run_lifecycle(py, &compiled.startup_hooks, "startup", &logger)?;
+
     let bind = parse_bind(host, port)?;
     let config = ServerConfig {
         bind,
@@ -70,7 +73,7 @@ pub(crate) fn serve(
     let addr = server.local_addr();
     log_message(py, &logger, format!("fulmen serving on http://{addr}"));
     py.detach(move || server.wait())?;
-    Ok(())
+    run_lifecycle(py, &compiled.shutdown_hooks, "shutdown", &logger)
 }
 
 /// A running test server: bound on an ephemeral port, stoppable via
@@ -79,6 +82,8 @@ pub(crate) fn serve(
 pub(crate) struct TestServer {
     server: Option<fulmen_server::Server>,
     addr: String,
+    /// `@app.on_shutdown` hooks, run once by `stop`.
+    shutdown_hooks: Option<Vec<LifecycleHook>>,
 }
 
 #[pymethods]
@@ -88,11 +93,15 @@ impl TestServer {
         &self.addr
     }
 
-    /// Shut the server down gracefully and wait for it to stop. Idempotent.
+    /// Shut the server down gracefully and wait for it to stop — then run
+    /// the app's `on_shutdown` hooks. Idempotent.
     fn stop(&mut self, py: Python<'_>) {
         if let Some(server) = self.server.take() {
             server.shutdown();
             let _ = py.detach(move || server.wait());
+        }
+        if let Some(hooks) = self.shutdown_hooks.take() {
+            let _ = run_lifecycle(py, &hooks, "shutdown", &logging(py));
         }
     }
 
@@ -168,13 +177,52 @@ pub(crate) fn serve_for_test(
         shutdown_timeout: Duration::from_secs(5),
         ..ServerConfig::default()
     };
+    let logger = std::sync::Arc::clone(&compiled.inner.logger);
+    run_lifecycle(py, &compiled.startup_hooks, "startup", &logger)?;
     let disp = dispatcher(&compiled);
     let server = py.detach(move || fulmen_server::serve(config, disp))?;
     let addr = server.local_addr().to_string();
     Ok(TestServer {
         server: Some(server),
         addr,
+        shutdown_hooks: Some(compiled.shutdown_hooks),
     })
+}
+
+/// Run `on_startup`/`on_shutdown` hooks: `def` hooks call directly,
+/// `async def` coroutines run on a throwaway `asyncio` loop (the app's
+/// own loop thread is only warranted during serving). A startup failure
+/// propagates — the app never starts half-initialized; a shutdown failure
+/// logs and lets the rest run.
+fn run_lifecycle(
+    py: Python<'_>,
+    hooks: &[LifecycleHook],
+    kind: &str,
+    logger: &Py<PyAny>,
+) -> PyResult<()> {
+    for hook in hooks {
+        let outcome = hook.callable.call0(py).and_then(|ret| {
+            if hook.is_async {
+                py.import("asyncio")?.call_method1("run", (ret.bind(py),))?;
+            }
+            Ok(())
+        });
+        if let Err(err) = outcome {
+            if kind == "startup" {
+                return Err(err);
+            }
+            log_message(py, logger, format!("on_{kind} hook raised: {err}"));
+        }
+    }
+    Ok(())
+}
+
+/// `logging.getLogger("fulmen")` for contexts without a compiled app.
+fn logging(py: Python<'_>) -> Py<PyAny> {
+    py.import("logging")
+        .and_then(|m| m.getattr("getLogger"))
+        .and_then(|f| f.call1(("fulmen",)))
+        .map_or_else(|_| py.None(), Bound::unbind)
 }
 
 /// Build a `SocketAddr` from `host:port`; `host` may be a bare IP or a

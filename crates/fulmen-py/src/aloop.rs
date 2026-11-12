@@ -111,6 +111,11 @@ struct AsyncJob {
     none_ok: bool,
     /// `false` on `on_error`-handler jobs: their failures never defer again.
     route_errors: bool,
+    /// `true` on hook jobs: the answer is the raw converted return
+    /// ([`JobAnswer::HookReturn`]), not a finalized wire response.
+    hook: bool,
+    /// The `on_error` table this job routes through (the route's own).
+    errors: Arc<ErrorTable>,
     /// Completes with the wire response or a deferred `on_error` call.
     respond: oneshot::Sender<JobAnswer>,
 }
@@ -127,6 +132,16 @@ struct Pending {
     none_ok: bool,
     /// `false` on `on_error`-handler jobs.
     route_errors: bool,
+    /// `true` on hook jobs — `complete` answers [`JobAnswer::HookReturn`].
+    hook: bool,
+    /// The `on_error` table this job routes through.
+    errors: Arc<ErrorTable>,
+    /// The job's `Request` snapshot — a hook returning a dict merges it
+    /// into `request.state` (§8).
+    request_snap: Option<Arc<crate::hooks::RequestSnapshot>>,
+    /// The job's response view — a post-phase hook's `None` propagates
+    /// the object's in-place mutations (§8).
+    response_view: Option<Arc<crate::hooks::ResponseView>>,
     /// Completes with the wire response or a deferred `on_error` call.
     respond: oneshot::Sender<JobAnswer>,
 }
@@ -196,8 +211,8 @@ struct AsyncShared {
     deadline: Duration,
     logger: Arc<Py<PyAny>>,
     response_cls: Arc<Py<PyAny>>,
-    /// The app's `@app.on_error` table (§17).
-    errors: Arc<ErrorTable>,
+    /// The `fulmen.request.Request` class — materializes `request` args.
+    request_cls: Arc<Py<PyAny>>,
     /// `Fulmen(debug=True)`/`serve(debug=…)`: every handler result is
     /// validated against its declared response descriptor (§11.6).
     debug: bool,
@@ -290,7 +305,7 @@ impl AsyncLoop {
             deadline,
             logger: deps.logger,
             response_cls: deps.response_cls,
-            errors: deps.errors,
+            request_cls: deps.request_cls,
             debug: deps.debug,
         });
         let ready = Arc::new(Ready {
@@ -339,6 +354,8 @@ impl AsyncLoop {
         contract: Arc<ResponseContract>,
         none_ok: bool,
         route_errors: bool,
+        hook: bool,
+        errors: Arc<ErrorTable>,
         respond: oneshot::Sender<JobAnswer>,
     ) -> Result<(), AsyncSubmitError> {
         let wake = {
@@ -356,6 +373,8 @@ impl AsyncLoop {
                 contract,
                 none_ok,
                 route_errors,
+                hook,
+                errors,
                 respond,
             });
             was_empty
@@ -519,9 +538,11 @@ impl AsyncPump {
         let ctx = PyCtx {
             logger: &self.shared.logger,
             response_cls: &self.shared.response_cls,
-            errors: &self.shared.errors,
+            request_cls: &self.shared.request_cls,
+            errors: &pending.errors,
             none_ok: pending.none_ok,
             route_errors: pending.route_errors,
+            hook: pending.hook,
             label: &pending.label,
             contract: &pending.contract,
             debug: self.shared.debug,
@@ -529,7 +550,18 @@ impl AsyncPump {
         let outcome = match task.call_method0(py, "result") {
             Ok(obj) => convert::settle(
                 py,
-                convert::convert_result(py, obj.bind(py), &ctx).map_err(InvokeError::Internal),
+                convert::hook_context(
+                    py,
+                    obj.bind(py),
+                    pending.request_snap.as_ref(),
+                    pending.response_view.as_ref(),
+                    &ctx,
+                )
+                .and_then(|merged| match merged {
+                    Some(ret) => Ok(ret),
+                    None => convert::convert_result(py, obj.bind(py), &ctx)
+                        .map_err(InvokeError::Internal),
+                }),
                 &pending.callable,
                 &ctx,
             ),
@@ -538,6 +570,7 @@ impl AsyncPump {
             }
         };
         let answer = match outcome {
+            CallOutcome::Return(ret) if pending.hook => JobAnswer::HookReturn(ret),
             CallOutcome::Return(ret) => JobAnswer::Response(convert::into_response(ret)),
             CallOutcome::Deferred(call) => JobAnswer::Deferred(call),
             CallOutcome::Failed => JobAnswer::Response(convert::internal_error()),
@@ -553,9 +586,11 @@ impl AsyncPump {
         let ctx = PyCtx {
             logger: &self.shared.logger,
             response_cls: &self.shared.response_cls,
-            errors: &self.shared.errors,
+            request_cls: &self.shared.request_cls,
+            errors: &job.errors,
             none_ok: job.none_ok,
             route_errors: job.route_errors,
+            hook: job.hook,
             label: &job.label,
             contract: &job.contract,
             debug: self.shared.debug,
@@ -568,7 +603,7 @@ impl AsyncPump {
         }
         // Build arguments and call the async def -> coroutine object. A
         // raise here is a handler failure, identical to the sync path.
-        let coro = match convert::build_args(py, &job.args).and_then(|(pos, kw)| {
+        let coro = match convert::build_args(py, &job.args, &ctx).and_then(|(pos, kw)| {
             job.callable
                 .call(py, pos, Some(&kw))
                 .map_err(InvokeError::Handler)
@@ -623,6 +658,10 @@ impl AsyncPump {
                 contract: Arc::clone(&job.contract),
                 none_ok: job.none_ok,
                 route_errors: job.route_errors,
+                hook: job.hook,
+                errors: job.errors,
+                request_snap: convert::request_snapshot(&job.args).map(Arc::clone),
+                response_view: convert::response_view(&job.args).map(Arc::clone),
                 respond: job.respond,
             },
         );
@@ -632,6 +671,7 @@ impl AsyncPump {
     /// response, or a deferred `on_error` call for the dispatcher.
     fn answer(job: AsyncJob, outcome: CallOutcome) {
         let answer = match outcome {
+            CallOutcome::Return(ret) if job.hook => JobAnswer::HookReturn(ret),
             CallOutcome::Return(ret) => JobAnswer::Response(convert::into_response(ret)),
             CallOutcome::Deferred(call) => JobAnswer::Deferred(call),
             CallOutcome::Failed => JobAnswer::Response(convert::internal_error()),
