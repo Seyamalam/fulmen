@@ -170,7 +170,7 @@ OpenAPI at `/openapi.json` with a docs UI, Pydantic adapter.
 
 ### Adapter
 
-- [ ] M2.17 `PydanticValidator`: pydantic models in parameters and returns, JSON schema into OpenAPI
+- [x] M2.17 `PydanticValidator`: pydantic models in parameters and returns, JSON schema into OpenAPI — `fulmen.adapters.pydantic` translates `model_fields`/`FieldInfo` (alias/validation_alias, constraint metadata, defaults/factories, `model_config`) into native `record` specs at registration; `pydantic-core` never runs on the request path, materialization restores `__pydantic_*` internals via `meta.after`, `RootModel`/generics supported, unsupported constructs raise `AnnotationError`; optional `fulmen[pydantic]` extra, lazy everything
 
 ### Guardrails added in M2
 
@@ -181,10 +181,24 @@ OpenAPI at `/openapi.json` with a docs UI, Pydantic adapter.
 
 ### Exit criteria
 
-- Validated 10-field body scenario at least 5× FastAPI.
-- 422 scenario at least 20× FastAPI (Python not entered; verified by a counter).
-- Generated OpenAPI passes an OpenAPI 3.1 validator for every test app.
-- Fuzzers run 1 hour each without findings.
+- Validated 10-field body scenario at least 5× FastAPI — **FAIL at 12 workers
+  (1.89× sync / 3.06× async), PASS per worker process (21.1× sync / 35.3×
+  async / 14.2× adapter)** — same shape as M1(a): FastAPI parallelizes its
+  pydantic work across spawned workers while fulmen's per-process number is
+  already near its pool bound (`benches/results/0.2.0.md` §a).
+- 422 scenario at least 20× FastAPI (Python not entered; verified by a
+  counter) — **FAIL on the multiplier (1.7× at 12 workers, 12.5× per
+  process); the property holds exactly: counter-verified 0 Python calls and
+  95–98% of the pure-Rust transport bound**. FastAPI's async-resident 422
+  path is its fastest route on this stack, so ≥20× would need ~11× the
+  machine's transport ceiling (§b).
+- Generated OpenAPI passes an OpenAPI 3.1 validator for every test app —
+  **PASS**: structural check inside `run.py` (10/10 per fulmen app:
+  version/paths/`$ref` request bodies/components/required/constraints) plus
+  `test_served_document_structure` walking the served doc.
+- Fuzzers run 1 hour each without findings — **PENDING** (M2.19 targets not
+  merged; `cargo-fuzz` installed, no harness). Interim: `decode_smoke.py`
+  60 s — 363k hostile requests, zero 5xx/hangs (§d).
 
 ---
 

@@ -16,6 +16,16 @@ scenario once per app, so the median is that observation).
 `--sweep-gil-batch 1,8,32,64` measures only the sync fulmen app on the
 JSON scenario, once per batch size (Q2 evidence, DESIGN.md §7.5).
 
+M2 adds two POST scenarios to `SCENARIOS`: `validated` posts the ~10-field
+order record to `/validate` (Fulmen `Body[Order]` model vs FastAPI's
+pydantic body model), and `reject` posts a constraint-violating body to
+the same route — Fulmen answers 422 from Rust before Python runs, which
+`counter_probe` verifies by diffing each app's `counter_path` endpoint
+around the measured run (`python_calls`). For apps flagged `openapi`,
+a structural check of the served `/openapi.json` runs after the
+scenarios and its booleans are stored as `__openapi__` (the M2 served-
+document criterion; `check.py` re-verifies it from the saved file).
+
 `--soak SECONDS` runs one app/scenario pair under `oha` for that long and
 samples the process tree's RSS every `--soak-interval` seconds (M1 exit
 criterion: RSS stable within 5%).
@@ -49,17 +59,68 @@ RESULTS_DIR = E2E_DIR / "results"
 BASELINE_PATH = REPO_ROOT / "benches" / "baseline.json"
 CEILING_BIN = REPO_ROOT / "target" / "release" / "ceiling-server"
 
-# The three M1 scenarios (benches/e2e/README.md): name -> request path.
-SCENARIOS: dict[str, str] = {
-    "plaintext": "/",
-    "json": "/json",
-    "item": "/items/42",
+
+@dataclasses.dataclass(frozen=True)
+class Scenario:
+    """One measured request shape (benches/e2e/README.md).
+
+    `counter_probe` fetches the app's `counter_path` before and after the
+    measured run and records the delta as `python_calls` — the M2 422
+    criterion's "invalid input never enters Python" evidence.
+    """
+
+    path: str
+    method: str = "GET"
+    body: bytes | None = None
+    content_type: str | None = None
+    counter_probe: bool = False
+
+
+# The ~10-field order record shared by `validated` and `reject` — mixed
+# str/int/float/bool plus a nested object (M2.17 §25.3).
+VALID_BODY = json.dumps(
+    {
+        "order_id": 7,
+        "customer": "ada lovelace",
+        "email": "ada@fulmen.dev",
+        "age": 36,
+        "price": 19.95,
+        "quantity": 2,
+        "sku": "SKU-77",
+        "tags": ["gift", "priority"],
+        "geo": {"lat": 51.5, "lon": -0.12},
+        "express": True,
+    }
+).encode()
+# Schema-valid JSON that violates field constraints (order_id<1, customer
+# empty, age negative, missing email, sku lowercase, lon out of range).
+INVALID_BODY = json.dumps(
+    {
+        "order_id": 0,
+        "customer": "",
+        "age": -3,
+        "price": 19.95,
+        "quantity": 2,
+        "sku": "bad",
+        "tags": ["gift"],
+        "geo": {"lat": 51.5, "lon": 999.0},
+        "express": False,
+    }
+).encode()
+
+# The M1 scenarios plus M2.17's validated-body and reject-path shapes.
+SCENARIOS: dict[str, Scenario] = {
+    "plaintext": Scenario("/"),
+    "json": Scenario("/json"),
+    "item": Scenario("/items/42"),
+    "validated": Scenario("/validate", "POST", VALID_BODY, "application/json", counter_probe=True),
+    "reject": Scenario("/validate", "POST", INVALID_BODY, "application/json", counter_probe=True),
 }
 
 # Apps whose numbers reflect Fulmen's own code. `just bench-check` only
 # gates on these; the third-party apps exist for ratio context and are
 # noisy across machines.
-SELF_APPS = ("fulmen", "fulmen_async", "ceiling")
+SELF_APPS = ("fulmen", "fulmen_async", "fulmen_pydantic", "ceiling")
 
 FRAMEWORKS = (
     "fastapi",
@@ -70,6 +131,7 @@ FRAMEWORKS = (
     "gunicorn",
     "uvloop",
     "fulmen",
+    "pydantic",
 )
 
 
@@ -102,6 +164,11 @@ class App:
     note: str
     command: Any  # (workers: int, extra: list[str]) -> list[str]
     env: dict[str, str] = dataclasses.field(default_factory=dict)
+    # `counter_path` serves {"calls": n} — handler-invocation evidence
+    # for the reject scenario; `openapi` requests a structural check of
+    # the served document after the scenario loop (M2 exit criterion).
+    counter_path: str | None = None
+    openapi: bool = False
 
 
 def _uvicorn(workers: int, extra: list[str], *, module: str, port: int) -> list[str]:
@@ -125,6 +192,7 @@ APPS: dict[str, App] = {
         8100,
         "uvicorn workers=N",
         lambda w, extra: _uvicorn(w, extra, module="apps.fastapi_app", port=8100),
+        counter_path="/__counter",
     ),
     "litestar": App(
         "litestar",
@@ -164,12 +232,24 @@ APPS: dict[str, App] = {
         8104,
         "fulmen run --workers N",
         lambda w, extra: fulmen_command(8104, w, "apps.fulmen_app", extra),
+        counter_path="/__counter",
+        openapi=True,
     ),
     "fulmen_async": App(
         "fulmen_async",
         8105,
         "fulmen run --workers N (async def)",
         lambda w, extra: fulmen_command(8105, w, "apps.fulmen_async_app", extra),
+        counter_path="/__counter",
+        openapi=True,
+    ),
+    "fulmen_pydantic": App(
+        "fulmen_pydantic",
+        8107,
+        "fulmen run --workers N (pydantic adapter)",
+        lambda w, extra: fulmen_command(8107, w, "apps.fulmen_pydantic_app", extra),
+        counter_path="/__counter",
+        openapi=True,
     ),
     "ceiling": App(
         "ceiling",
@@ -234,7 +314,14 @@ def wait_ready(port: int, server: ServerProc, timeout: float) -> None:
 
 
 def run_oha(
-    url: str, duration_s: float, connections: int, *, json_out: bool = True
+    url: str,
+    duration_s: float,
+    connections: int,
+    *,
+    json_out: bool = True,
+    method: str = "GET",
+    body: bytes | None = None,
+    content_type: str | None = None,
 ) -> dict[str, Any]:
     """One `oha` run; `-w` waits for in-flight requests at the deadline so
     they are not counted as aborts."""
@@ -248,8 +335,16 @@ def run_oha(
         "--no-tui",
         "--output-format",
         "json" if json_out else "quiet",
-        url,
     ]
+    if method != "GET":
+        args += ["-m", method]
+    if body is not None:
+        body_path = RESULTS_DIR / "oha-body.json"
+        body_path.write_bytes(body)
+        args += ["-D", str(body_path)]
+        if content_type:
+            args += ["-H", f"content-type: {content_type}"]
+    args.append(url)
     proc = sh(args)
     if not json_out:
         return {}
@@ -259,12 +354,17 @@ def run_oha(
 
 
 def measure(
-    port: int, path: str, duration_s: float, connections: int, warmup_s: float
+    port: int, scenario: Scenario, duration_s: float, connections: int, warmup_s: float
 ) -> RunResult:
-    url = f"http://127.0.0.1:{port}{path}"
+    url = f"http://127.0.0.1:{port}{scenario.path}"
+    call = {
+        "method": scenario.method,
+        "body": scenario.body,
+        "content_type": scenario.content_type,
+    }
     if warmup_s > 0:
-        run_oha(url, warmup_s, connections, json_out=False)
-    data = run_oha(url, duration_s, connections)
+        run_oha(url, warmup_s, connections, json_out=False, **call)  # type: ignore[arg-type]
+    data = run_oha(url, duration_s, connections, **call)  # type: ignore[arg-type]
     summary = data["summary"]
     percentiles = data["latencyPercentiles"]
     return RunResult(
@@ -313,12 +413,61 @@ class ServerProc:
         return self.proc.poll() is not None
 
 
+def fetch_json(port: int, path: str) -> dict[str, Any]:
+    """One `GET` for JSON — counter probes and the OpenAPI check."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path)
+    resp = conn.getresponse()
+    data = resp.read()
+    status = resp.status
+    conn.close()
+    if status != 200:
+        raise RuntimeError(f"GET {path} answered {status}")
+    return json.loads(data)  # type: ignore[no-any-return]
+
+
+def check_openapi(port: int) -> dict[str, bool]:
+    """The M2 OpenAPI exit criterion: the served document parses and the
+    rich app's surface is all there — 3.1 version, route paths, the
+    `/validate` requestBody `$ref` into `components/schemas`, the nested
+    `Geo` component, required fields and emitted constraints."""
+    doc = fetch_json(port, "/openapi.json")
+    order = (doc.get("components", {}).get("schemas") or {}).get("Order") or {}
+    geo = (doc.get("components", {}).get("schemas") or {}).get("Geo") or {}
+    props = order.get("properties") or {}
+    post = (doc.get("paths", {}).get("/validate") or {}).get("post") or {}
+    req_schema = (
+        (post.get("requestBody") or {}).get("content", {}).get("application/json", {})
+    ).get("schema") or {}
+    checks = {
+        "version_3_1": doc.get("openapi") == "3.1.0",
+        "info_title": bool((doc.get("info") or {}).get("title")),
+        "paths_present": all(
+            p in doc.get("paths", {}) for p in ("/", "/json", "/items/{item_id}", "/validate")
+        ),
+        "validate_request_body": bool(req_schema.get("$ref")),
+        "order_component": order.get("type") == "object" and len(props) >= 10,
+        "geo_component": geo.get("type") == "object"
+        and set(geo.get("properties") or {}) == {"lat", "lon"},
+        "order_required": {"order_id", "customer", "email"} <= set(order.get("required") or []),
+        "order_constraints": (props.get("order_id") or {}).get("minimum") == 1
+        and (props.get("customer") or {}).get("minLength") == 1
+        and "pattern" in (props.get("sku") or {}),
+        "order_nested_geo": "geo" in props,
+        "response_200": "200" in (post.get("responses") or {}),
+    }
+    if not all(checks.values()):
+        bad = [k for k, v in checks.items() if not v]
+        raise RuntimeError(f"openapi.json structural check failed: {bad}")
+    return checks
+
+
 def bench_app(
     app: App,
-    scenarios: dict[str, str],
+    scenarios: dict[str, Scenario],
     args: argparse.Namespace,
     extra: list[str] | None = None,
-) -> dict[str, RunResult]:
+) -> dict[str, dict[str, Any]]:
     """Warm up and measure every scenario for one app, then stop it."""
     command = app.command(args.workers, extra or [])
     print(f"[{app.key}] {' '.join(command)}  ({app.note})", flush=True)
@@ -327,22 +476,36 @@ def bench_app(
             f"port {app.port} is already in use; kill the stale server before benching {app.key}"
         )
     server = ServerProc(command, E2E_DIR, app.env)
-    out: dict[str, RunResult] = {}
+    out: dict[str, dict[str, Any]] = {}
     try:
         wait_ready(app.port, server, timeout=args.startup_timeout)
-        for name, path in scenarios.items():
+        for name, scenario in scenarios.items():
             if server.crashed():
                 raise RuntimeError(f"{app.key} exited early; see {server.log_path}")
-            result = measure(app.port, path, args.duration, args.connections, args.warmup)
+            calls_before = (
+                fetch_json(app.port, app.counter_path)["calls"]
+                if scenario.counter_probe and app.counter_path
+                else None
+            )
+            result = measure(app.port, scenario, args.duration, args.connections, args.warmup)
             if server.crashed():
                 raise RuntimeError(f"{app.key} died under load; see {server.log_path}")
-            out[name] = result
+            entry = result.as_dict()
+            if calls_before is not None:
+                calls_after = fetch_json(app.port, app.counter_path)["calls"]
+                entry["python_calls"] = calls_after - calls_before
+            out[name] = entry
             print(
                 f"  {name:<10} {result.requests_per_sec:>10.0f} req/s  "
                 f"p50 {result.p50_ms:.3f} ms  p99 {result.p99_ms:.3f} ms  "
-                f"errors {result.errors or '{}'}",
+                f"errors {result.errors or '{}'}"
+                + (f"  python_calls={entry['python_calls']}" if calls_before is not None else ""),
                 flush=True,
             )
+        if app.openapi:
+            checks = check_openapi(app.port)
+            out["__openapi__"] = checks  # type: ignore[dict-item]
+            print(f"  openapi    {sum(checks.values())}/{len(checks)} checks ok", flush=True)
     finally:
         server.stop()
     return out
@@ -528,16 +691,15 @@ def main() -> int:
         sweep: dict[str, Any] = {}
         for size in sizes:
             extra = ["--gil-batch-size", size]
-            results = bench_app(app, {"json": "/json"}, args, extra=extra)
-            sweep[size] = results["json"].as_dict()
+            results = bench_app(app, {"json": SCENARIOS["json"]}, args, extra=extra)
+            sweep[size] = results["json"]
         document = {"metadata": metadata(args), "sweep_gil_batch_size": sweep}
         write_json(RESULTS_DIR / "gil_batch_sweep.json", document)
         return 0
 
     document: dict[str, Any] = {"metadata": metadata(args), "results": {}}
     for app in apps.values():
-        results = bench_app(app, scenarios, args)
-        document["results"][app.key] = {name: r.as_dict() for name, r in results.items()}
+        document["results"][app.key] = bench_app(app, scenarios, args)
     write_json(args.out, document)
     if args.set_baseline:
         write_json(BASELINE_PATH, document)

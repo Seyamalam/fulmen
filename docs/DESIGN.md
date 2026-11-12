@@ -686,10 +686,43 @@ Input values are not echoed back by default (they may contain secrets).
 
 ### 11.8 Pydantic adapter
 
-`Fulmen(validator=PydanticValidator())` or per route. Pydantic models are then
-accepted wherever `Model` is, validated by `pydantic-core`, and documented in
-OpenAPI from their JSON schema. It costs extra Python crossings compared to
-the native path; the docs state the cost.
+`fulmen.adapters.pydantic` makes pydantic v2 `BaseModel` subclasses first-class
+schema citizens: they are accepted wherever `Model` is — parameters, returns,
+nested inside other types. The adapter **translates** a model into a `record`
+spec at route-registration time; request validation, materialization, response
+encoding and OpenAPI then run through the same native `Descriptor` machinery as
+`Model`. `pydantic-core` is never invoked on the request path — invalid bodies
+are rejected in Rust before Python runs, so the adapter costs no Python
+crossings beyond the handler call itself.
+
+Detection is duck-typed (`model_fields` + `model_config` +
+`__pydantic_serializer__`), so `SpecBuilder` never imports pydantic. The
+`pydantic` package itself is an optional dependency (`pip install
+fulmen[pydantic]`); the adapter module imports nothing from it, and
+`fulmen.PydanticValidator` — the §15.1 `Validator` implementation —
+resolves lazily with an informative error when the extra is absent.
+
+The translation reads `model_fields` (`FieldInfo`), not
+`model_json_schema()`: `annotation`/`alias`/`validation_alias`, `metadata`
+(`annotated_types`/`StringConstraints`/`_PydanticGeneralMetadata` → `Range`,
+`Len`, `Pattern`, `MultipleOf`, `Strip`/`Lower`/`Upper`, `AfterValidator`,
+`Description`/`Example`/`Deprecated`), defaults and `default_factory`, plus
+`model_config` (`extra` → record `extra`, `alias_generator`, `str_*` →
+transforms, `strict`, `populate_by_name`/`validate_by_name` — noted no-ops).
+Pydantic-only annotations (`BeforeValidator`/`WrapValidator`/
+`PlainValidator` metadata, `SkipValidation`, `AliasChoices`/`AliasPath`,
+`SecretStr`, `ByteSize`, `decimal_places`/`max_digits`, `allow_inf_nan`)
+raise `AnnotationError` at startup rather than diverge silently.
+`field_validator(mode="after")`/`AfterValidator` run as `meta.after` hooks;
+`model_validator(mode="after")` runs inside a record-level finalize that
+first restores `__pydantic_fields_set__`/`__pydantic_extra__`/
+`__pydantic_private__` (the `model_construct` order) so materialized
+instances are fully working models. `RootModel` wraps the root node through
+`model_construct`; generic `Page[T]` materializes through the generic-node
+path; recursive models raise `AnnotationError` (records have no fixpoint).
+`serialization_alias`, `exclude_unset`, `computed_field` and serializers are
+documented no-ops/divergences — Fulmen always emits declared fields under
+their canonical names.
 
 ## 12. Dependency injection
 
@@ -952,7 +985,7 @@ handling tied to the response status.
 
 | Interface | Built-ins | Native? |
 | --- | --- | --- |
-| `Validator` | native (default), pydantic | native / Python |
+| `Validator` | native (default), pydantic (translates to native specs) | native |
 | `SessionStore` | signed cookie (default), memory, redis | native |
 | `RateLimitStore` | memory (default), redis | native |
 | `CacheStore` | memory (default), redis | native |

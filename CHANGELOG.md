@@ -126,6 +126,35 @@ exists. Move the `Unreleased` entries under the new version heading first.
   time. Route decorators accept `tags`, `summary`, `description`,
   `operation_id`, `deprecated` and `include_in_schema`; unknown options
   raise `TypeError`.
+- Pydantic v2 adapter (`fulmen.adapters.pydantic`, M2.17, DESIGN.md
+  §11.8): `BaseModel` subclasses are first-class schema citizens —
+  valid anywhere `Model` is (parameters, returns, nested fields,
+  `Body[T]`). The adapter *translates* `model_fields`/`FieldInfo` into
+  native `record` specs at route registration, so validation,
+  materialization, response encoding and OpenAPI run through the same
+  `Descriptor` machinery as `Model`: `pydantic-core` is never invoked
+  on the request path and invalid bodies still 422 in Rust without
+  entering Python. Maps `alias`/`validation_alias`, `ge`/`gt`/`le`/`lt`,
+  `min_length`/`max_length`, `pattern`, `multiple_of`,
+  `strip_whitespace`/`to_lower`/`to_upper`, defaults and
+  `default_factory`, `extra` config (`allow`→keep, `forbid`→forbid,
+  `ignore`→ignore), `alias_generator`, `AfterValidator`/`field_validator`
+  (mode="after") and `model_validator(mode="after")`. Materialization
+  restores `__pydantic_fields_set__`/`__pydantic_extra__`/
+  `__pydantic_private__` so instances behave like `model_construct`
+  output — `model_dump()`/`repr`/`eq`/private attrs all work.
+  `RootModel`, generic `Page[T]`, `Literal`-discriminated unions and
+  nested models covered; unsupported constructs (`Before`/`Wrap`/`Plain`
+  validators, `SkipValidation`, `AliasChoices`/`AliasPath`, `SecretStr`,
+  `ByteSize`, `decimal_places`, `allow_inf_nan`, recursive models) raise
+  `AnnotationError` at startup rather than silently diverge. Everything
+  stays lazy — `SpecBuilder` detects models by duck-typing so
+  `import fulmen` never imports pydantic, `fulmen.PydanticValidator`
+  resolves on first access, and the extra is optional
+  (`pip install fulmen[pydantic]`); without it the adapter raises an
+  informative error. E2E: `validated`/`reject` POST scenarios in
+  `benches/e2e` (pydantic app on port 8107 included) measure the
+  adapter at native-descriptor speed — see `benches/results/0.2.0.md`.
 
 ### Fixed
 
