@@ -161,7 +161,7 @@ OpenAPI at `/openapi.json` with a docs UI, Pydantic adapter.
 
 ### API surface
 
-- [ ] M2.11 OpenAPI 3.1 generation from the IR; `/openapi.json`; docs UI (Scalar or Swagger UI, self-hosted assets)
+- [x] M2.11 OpenAPI 3.1 generation from the IR; `/openapi.json`; docs UI (Scalar or Swagger UI, self-hosted assets) — Swagger UI 5.34.1 vendored gzip-compressed under `fulmen/static`; `Fulmen(title=..., version=..., openapi_url=..., docs_url=...)` + `app.openapi()`
 - [x] M2.12 `Model` class: native `__init__` (`Descriptor.construct`), `dataclass_transform`, `frozen`, `extra`, `rename`, validated `__setattr__` — no `__slots__` (models keep `__dict__` for `vars()`/`model_dump`); `model_validate`/`model_dump` included
 - [x] M2.13 Parameter sources (DESIGN.md §5.2): path, query, header (case-insensitive), cookie, JSON body, form-urlencoded, raw `bytes`/`Raw` — extracted and validated in `fulmen-py/src/extract.rs` without the GIL; multipart file upload remains (the `File`/`UploadFile` marker exists but has no `file` call-source yet)
 - [x] M2.14 Response types: `Created[T]`, `Accepted[T]`, `NoContent`, `Redirect`, `FileResponse`, `Stream`, unions — `Stream`/`FileResponse` buffer the body; native chunked streaming is the documented M5 deviation (§10.3, §18.3)

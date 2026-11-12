@@ -1,24 +1,31 @@
 """The `Fulmen` application object (DESIGN.md §5.1, §5.2, §13.3).
 
-Route decorators record `(method, path, handler)` tuples; `on_error`
+Route decorators record `(method, path, handler, meta)` tuples; `on_error`
 registrations record `(exc_class, handler)` pairs. Nothing is inspected
 or compiled at decoration time; `run()` (or a test server via
 `Fulmen._compile_native()`) inspects each handler's signature and type
 hints — `_typing.py` turns every parameter into its source/wire-name/
 descriptor/missing spec — hands the declarations to Rust, and serves.
+
+The same frozen spec trees feed `Fulmen.openapi()` — the OpenAPI 3.1
+document (§11.3, §23.2, `fulmen.openapi`) — which `_compile_native`
+renders once and mounts as `GET openapi_url` plus a self-hosted Swagger
+UI under `docs_url` when configured.
 """
 
 from __future__ import annotations
 
 import inspect
 import typing
-from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Unpack
 
 from fulmen import _typing
+from fulmen import openapi as _openapi
 from fulmen._fulmen import NativeApp, StartupError, compile_descriptor
 from fulmen._fulmen import serve as _serve
 from fulmen.constraints import UNSET
+from fulmen.responses import Response
 
 if TYPE_CHECKING:
     from fulmen._fulmen import Descriptor
@@ -55,53 +62,117 @@ _RouteSpec = tuple[
 class Fulmen:
     """A Fulmen application: routes and error handlers, then `run()`."""
 
-    __slots__ = ("_declared", "_error_handlers")
+    __slots__ = ("_api_info", "_declared", "_docs_url", "_error_handlers", "_openapi_url")
 
-    def __init__(self) -> None:
-        self._declared: list[tuple[str, str, _Handler]] = []
+    def __init__(
+        self,
+        *,
+        title: str = "Fulmen",
+        version: str = "0.1.0",
+        description: str | None = None,
+        contact: Mapping[str, Any] | None = None,
+        license: Mapping[str, Any] | None = None,
+        servers: Iterable[str | Mapping[str, Any]] | None = None,
+        tags: Iterable[str | Mapping[str, Any]] | None = None,
+        openapi_url: str | None = "/openapi.json",
+        docs_url: str | None = "/docs",
+    ) -> None:
+        """Application metadata and docs serving switches (§5, §23.2).
+
+        `title`/`version`/`description`/`contact`/`license` become the
+        document's `info` object; `servers`/`tags` the top-level lists —
+        each item a `str` (`{"url": ...}`/`{"name": ...}` shorthand) or a
+        full OpenAPI object mapping.
+
+        `openapi_url` mounts `GET <url>` serving the OpenAPI 3.1
+        document; `docs_url` mounts the Swagger UI page (and its
+        self-hosted assets) that reads it. `openapi_url=None` disables
+        both endpoints — nothing is generated or mounted, so an app that
+        opts out pays exactly nothing. `docs_url=None` keeps the
+        document but drops the UI. A declared route wins over these
+        convenience mounts.
+        """
+        for name, url in (("openapi_url", openapi_url), ("docs_url", docs_url)):
+            if url is not None and (not url.startswith("/") or '"' in url):
+                raise ValueError(
+                    f"{name} must be None or an absolute path starting with '/', got {url!r}"
+                )
+        self._declared: list[tuple[str, str, _Handler, _openapi.OperationMeta]] = []
         self._error_handlers: list[tuple[type[BaseException], _Handler, bool]] = []
+        self._api_info = _openapi.ApiInfo(
+            title=title,
+            version=version,
+            description=description,
+            contact=contact,
+            license=license,
+            servers=tuple(servers or ()),
+            tags=tuple(tags or ()),
+        )
+        self._openapi_url = openapi_url
+        self._docs_url = docs_url
 
     def route(
         self,
         path: str,
         methods: Iterable[str] = ("GET",),
+        **options: Unpack[_openapi.RouteOptions],
     ) -> Callable[[_Handler], _Handler]:
-        """Register a handler for `path` under each method in `methods`."""
+        """Register a handler for `path` under each method in `methods`.
+
+        `options` are documentation hints consumed by OpenAPI generation
+        (`tags`, `summary`, `description`, `operation_id`, `deprecated`,
+        `include_in_schema`) — they never change dispatch.
+        """
+        meta = _openapi.operation_meta(options)
 
         def decorator(handler: _Handler) -> _Handler:
             for method in methods:
-                self._declared.append((method.upper(), path, handler))
+                self._declared.append((method.upper(), path, handler, meta))
             return handler
 
         return decorator
 
-    def get(self, path: str) -> Callable[[_Handler], _Handler]:
+    def get(
+        self, path: str, **options: Unpack[_openapi.RouteOptions]
+    ) -> Callable[[_Handler], _Handler]:
         """Register `handler` for `GET path`."""
-        return self.route(path, methods=("GET",))
+        return self.route(path, methods=("GET",), **options)
 
-    def post(self, path: str) -> Callable[[_Handler], _Handler]:
+    def post(
+        self, path: str, **options: Unpack[_openapi.RouteOptions]
+    ) -> Callable[[_Handler], _Handler]:
         """Register `handler` for `POST path`."""
-        return self.route(path, methods=("POST",))
+        return self.route(path, methods=("POST",), **options)
 
-    def put(self, path: str) -> Callable[[_Handler], _Handler]:
+    def put(
+        self, path: str, **options: Unpack[_openapi.RouteOptions]
+    ) -> Callable[[_Handler], _Handler]:
         """Register `handler` for `PUT path`."""
-        return self.route(path, methods=("PUT",))
+        return self.route(path, methods=("PUT",), **options)
 
-    def patch(self, path: str) -> Callable[[_Handler], _Handler]:
+    def patch(
+        self, path: str, **options: Unpack[_openapi.RouteOptions]
+    ) -> Callable[[_Handler], _Handler]:
         """Register `handler` for `PATCH path`."""
-        return self.route(path, methods=("PATCH",))
+        return self.route(path, methods=("PATCH",), **options)
 
-    def delete(self, path: str) -> Callable[[_Handler], _Handler]:
+    def delete(
+        self, path: str, **options: Unpack[_openapi.RouteOptions]
+    ) -> Callable[[_Handler], _Handler]:
         """Register `handler` for `DELETE path`."""
-        return self.route(path, methods=("DELETE",))
+        return self.route(path, methods=("DELETE",), **options)
 
-    def head(self, path: str) -> Callable[[_Handler], _Handler]:
+    def head(
+        self, path: str, **options: Unpack[_openapi.RouteOptions]
+    ) -> Callable[[_Handler], _Handler]:
         """Register `handler` for `HEAD path`."""
-        return self.route(path, methods=("HEAD",))
+        return self.route(path, methods=("HEAD",), **options)
 
-    def options(self, path: str) -> Callable[[_Handler], _Handler]:
+    def options(
+        self, path: str, **options: Unpack[_openapi.RouteOptions]
+    ) -> Callable[[_Handler], _Handler]:
         """Register `handler` for `OPTIONS path`."""
-        return self.route(path, methods=("OPTIONS",))
+        return self.route(path, methods=("OPTIONS",), **options)
 
     def on_error(self, exc_class: object) -> Callable[[_Handler], _Handler]:
         """Register a handler for exceptions route handlers raise (§17).
@@ -171,6 +242,18 @@ class Fulmen:
             gil_batch_size=gil_batch_size,
         )
 
+    def openapi(self) -> dict[str, Any]:
+        """The OpenAPI 3.1 document for the declared routes (§11.3, §23.2).
+
+        Inspects handlers exactly like `_compile_native` — a broken app
+        raises `StartupError` here too. The returned dict is freshly
+        built each call; serving renders it once at startup instead.
+        """
+        specs, problems = self._route_specs()
+        if problems:
+            raise _startup_error(problems)
+        return _openapi.generate(self._api_info, [_route_entry(spec, meta) for spec, meta in specs])
+
     def _compile_native(self) -> NativeApp:
         """Inspect every recorded handler and build the native declaration.
 
@@ -180,16 +263,52 @@ class Fulmen:
         core compile errors.
         """
         native = NativeApp()
-        problems: list[str] = []
-        for method, path, handler in self._declared:
-            spec = _inspect_handler(method, path, handler, problems)
-            if spec is not None:
-                native.add_route(spec)
+        specs, problems = self._route_specs()
+        for spec, _meta in specs:
+            native.add_route(spec)
         for exc_class, handler, is_async in self._error_handlers:
             native.add_error_handler(exc_class, handler, is_async)
         if problems:
             raise _startup_error(problems)
+        self._serve_docs(native, specs)
         return native
+
+    def _route_specs(self) -> tuple[list[tuple[_RouteSpec, _openapi.OperationMeta]], list[str]]:
+        """Every declaration inspected into its `_RouteSpec` + doc meta,
+        plus the aggregated problem list."""
+        specs: list[tuple[_RouteSpec, _openapi.OperationMeta]] = []
+        problems: list[str] = []
+        for method, path, handler, meta in self._declared:
+            spec = _inspect_handler(method, path, handler, problems)
+            if spec is not None:
+                specs.append((spec, meta))
+        return specs, problems
+
+    def _serve_docs(
+        self,
+        native: NativeApp,
+        specs: list[tuple[_RouteSpec, _openapi.OperationMeta]],
+    ) -> None:
+        """Mount `GET openapi_url`, `GET docs_url` and the UI assets, each
+        serving a body rendered once here — the spec trees are frozen at
+        compile time, so there is nothing left to compute per request.
+        `openapi_url=None` registers nothing."""
+        if self._openapi_url is None:
+            return
+        entries = [_route_entry(spec, meta) for spec, meta in specs]
+        document = _openapi.render(_openapi.generate(self._api_info, entries))
+        taken = {(method, path) for method, path, _handler, _meta in self._declared}
+        _add_static_route(native, taken, self._openapi_url, document, "application/json")
+        if self._docs_url is None:
+            return
+        page = _openapi.docs_html(
+            openapi_url=self._openapi_url,
+            docs_url=self._docs_url,
+            title=self._api_info.title,
+        ).encode()
+        _add_static_route(native, taken, self._docs_url, page, "text/html; charset=utf-8")
+        for path, body, content_type in _openapi.docs_assets(self._docs_url):
+            _add_static_route(native, taken, path, body, content_type)
 
 
 def _startup_error(problems: list[str]) -> StartupError:
@@ -283,6 +402,46 @@ def _inspect_handler(
         any(variant.status == 204 for variant in variants),
         response_descs,
     )
+
+
+def _route_entry(
+    spec: _RouteSpec,
+    meta: _openapi.OperationMeta,
+) -> _openapi.RouteEntry:
+    """Project a `_RouteSpec` into the `RouteEntry` generation consumes —
+    descriptors resolved to their spec dicts."""
+    return _openapi.RouteEntry(
+        method=spec[0],
+        path=spec[1],
+        call_args=tuple(
+            (name, source, kind, wire, desc.spec if desc is not None else None, missing)
+            for name, source, kind, wire, desc, missing in spec[3]
+        ),
+        responses=tuple(
+            (status, desc.spec if desc is not None else None) for status, desc in spec[7]
+        ),
+        handler=spec[4],
+        meta=meta,
+    )
+
+
+def _add_static_route(
+    native: NativeApp,
+    taken: set[tuple[str, str]],
+    path: str,
+    body: bytes,
+    content_type: str,
+) -> None:
+    """Mount a `GET` serving a pre-built body. A declared route for the
+    same `GET path` wins — skip the mount instead of a duplicate-route
+    startup error."""
+    if ("GET", path) in taken:
+        return
+
+    def handler() -> Response:
+        return Response(body, content_type=content_type)
+
+    native.add_route(("GET", path, [], [], handler, False, False, [(None, None)]))
 
 
 def _missing_policy(info: _typing.ParamInfo, signature: inspect.Signature) -> tuple[str, object]:

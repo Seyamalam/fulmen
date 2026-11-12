@@ -7,3 +7,10 @@ under the Apache License. See TRADEMARKS.md.
 
 Any redistribution or derivative work must retain this NOTICE file, as
 required by Section 4(d) of the Apache License, Version 2.0.
+
+---
+
+This product bundles a pinned copy of Swagger UI (`swagger-ui-dist`
+5.34.1, https://github.com/swagger-api/swagger-ui), which is licensed
+under the Apache License, Version 2.0. The vendored assets live in
+`python/fulmen/static/` and are copyright their respective authors.

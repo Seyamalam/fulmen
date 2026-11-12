@@ -76,6 +76,34 @@ exists. Move the `Unreleased` entries under the new version heading first.
   disabled (`JobAnswer::Deferred`). Path-param `int` mismatches stay 404
   by construction, other scalars 422 (Q4 → D20). Pyright strict clean;
   `_fulmen.pyi` documents every new `#[pyfunction]`/`#[pyclass]`.
+- OpenAPI 3.1 generation and docs UI (M2.11): `app.openapi()` walks the
+  frozen route spec (`call_args`, `param_types`, `response_descs`,
+  `Descriptor.spec`) and renders a deterministic OpenAPI 3.1 document —
+  JSON Schema 2020-12 dialect throughout (type arrays for nullable,
+  numeric `exclusiveMinimum`/`exclusiveMaximum`, `const`/`enum`,
+  `prefixItems` for tuples). Parameters carry `in`, `required`, schema
+  with constraints (`Len`/`Pattern`/`Range`/`MultipleOf`), defaults
+  (including Python signature defaults), `Alias`, `Description`,
+  `Example` and `Deprecated`; bodies map to `application/json`,
+  `application/octet-stream` (`bytes`/`Raw`), form-urlencoded or
+  multipart (grouped `File` params); responses key by status with
+  `default` for dynamic `Response` returns and a bare-200 fallback.
+  Records, generic specializations and enums dedupe into
+  `components/schemas` behind `$ref`; unions become `anyOf`, and
+  same-status record variants sharing a single-valued `Literal` tag
+  field merge into `oneOf` + `discriminator`. `Fulmen(...)` gains
+  keyword-only `title`/`version`/`description`/`contact`/`license`/
+  `servers`/`tags` metadata plus `openapi_url="/openapi.json"` and
+  `docs_url="/docs"` switches (`None` disables; docs imply OpenAPI, so
+  `openapi_url=None` drops both). The document is rendered once during
+  `_compile_native` and served verbatim by synthetic GET routes —
+  declared routes at the same path win, disabled mode registers nothing
+  and 404s. Docs UI is Swagger UI 5.34.1 vendored gzip-compressed under
+  `fulmen/static` (`swagger-ui-dist`, Apache-2.0 — self-hosted per
+  ROADMAP, under the 512 KiB guardrail), decompressed once at compile
+  time. Route decorators accept `tags`, `summary`, `description`,
+  `operation_id`, `deprecated` and `include_in_schema`; unknown options
+  raise `TypeError`.
 
 ### Fixed
 
