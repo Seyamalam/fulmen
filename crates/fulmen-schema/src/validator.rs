@@ -93,6 +93,34 @@ impl Validator {
         source: Source,
         mode: Mode,
     ) -> Result<Cow<'v, Value<'v>>, ValidationErrors> {
+        match self.validate_out(input, source, mode) {
+            Ok(Checked::Same(input)) => Ok(Cow::Borrowed(input)),
+            Ok(Checked::New(v)) => Ok(Cow::Owned(v)),
+            Err(errs) => Err(errs),
+        }
+    }
+
+    /// Validate `input` like [`Validator::validate`], but keep the
+    /// output's buffer lifetime (`'i`) independent of the input borrow
+    /// (`'v`): a [`Checked::New`] result is a `Value<'i>` that outlives
+    /// the borrow of `input`.
+    ///
+    /// This is the form decode-and-validate paths need: the decoded
+    /// `Value` is typically a local, so `Cow::Borrowed(&local)` and a
+    /// rewritten `Value<'borrow-of-local>` could never leave the call.
+    /// With `Checked`, `Same` means "the input passed" and callers move
+    /// or drop their own `Value`, while `New` is returned with the full
+    /// buffer lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Same contract as [`Validator::validate`].
+    pub fn validate_out<'v, 'i>(
+        &self,
+        input: &'v Value<'i>,
+        source: Source,
+        mode: Mode,
+    ) -> Result<Checked<'v, 'i>, ValidationErrors> {
         let mut ctx = Ctx {
             source,
             mode,
@@ -104,13 +132,29 @@ impl Validator {
         let out = self.root.check_value(input, &mut ctx);
         if ctx.errs.is_empty() {
             Ok(match out {
-                Some(Outcome::Same) | None => Cow::Borrowed(input),
-                Some(Outcome::New(v)) => Cow::Owned(v),
+                Some(Outcome::Same) | None => Checked::Same(input),
+                Some(Outcome::New(v)) => Checked::New(v),
             })
         } else {
             Err(ctx.errs)
         }
     }
+}
+
+/// The outcome of [`Validator::validate_out`]: the `Same`/`New` split of
+/// the internal `Outcome`, but `New` carries the input's buffer lifetime
+/// `'i` rather than the borrow `'v`, so rewritten values escape the call
+/// site (see the method's docs).
+#[derive(Debug)]
+pub enum Checked<'v, 'i> {
+    /// Every check passed on the input unchanged — the strict happy
+    /// path. The input is handed back for convenience; callers that own
+    /// it can equally keep using their own value.
+    Same(&'v Value<'i>),
+    /// Validation rewrote the value — lax coercions, canonicalized
+    /// datetimes/IPs/decimals, canonical record keys, injected defaults,
+    /// deduplicated sets.
+    New(Value<'i>),
 }
 
 // ---- compiled node tree ----------------------------------------------------

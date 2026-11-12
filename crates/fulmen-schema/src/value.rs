@@ -415,6 +415,47 @@ impl LiteralValue {
             Self::Bytes(b) => format!("{b:?}"),
         }
     }
+
+    /// Render as a JSON literal: `null`, `true`, `1`, `1.5`, `"abc"`.
+    /// Strings are quoted and JSON-escaped; `BigInt` emits its decimal
+    /// digits (a valid JSON number); a non-finite float renders as
+    /// `null` since JSON has no literal for it; bytes render as
+    /// `\xNN`-escaped ASCII text inside quotes. This is the `limit`
+    /// field encoding of §11.7 and lets `fulmen-py` serialize entries
+    /// without serde.
+    pub fn to_json(&self) -> String {
+        match self {
+            Self::Bool(b) => b.to_string(),
+            Self::Int(i) => i.to_string(),
+            Self::UInt(u) => u.to_string(),
+            Self::BigInt(t) => t.to_string(),
+            Self::Float(f) if f.is_finite() => format!("{f:?}"),
+            // Non-finite floats have no JSON literal — render `null`.
+            Self::Null | Self::Float(_) => "null".to_owned(),
+            Self::Str(s) => format!("\"{}\"", escape_json(s)),
+            Self::Bytes(b) => format!("\"{}\"", escape_json(&b.escape_ascii().to_string())),
+        }
+    }
+}
+
+/// JSON-escape `s`'s content (no surrounding quotes): `\"`, `\\`,
+/// `\n`, `\r`, `\t` plus `\uXXXX` for other control characters.
+pub(crate) fn escape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => {
+                let _ = fmt::Write::write_fmt(&mut out, format_args!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 impl PartialEq for LiteralValue {
