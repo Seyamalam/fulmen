@@ -153,11 +153,11 @@ OpenAPI at `/openapi.json` with a docs UI, Pydantic adapter.
 - [x] M2.3 Containers, `Literal`, enums, `Optional`, unions, discriminated unions
 - [x] M2.4 Records: `Model`, dataclasses, `TypedDict` (`NotRequired`), generics, `NewType`
 - [x] M2.5 Constraints: `Len`, `Range`, `Pattern` (Rust `regex`), `MultipleOf`, `Unique`, transforms
-- [ ] M2.6 One-pass JSON decode + validate into Python objects; decide Q3 (JSON engine) by benchmark
-- [ ] M2.7 Strict mode for JSON, lax coercion for query/path/headers/forms
-- [ ] M2.8 Depth, item count and string length limits
+- [x] M2.6 One-pass JSON decode + validate into Python objects; decide Q3 (JSON engine) by benchmark — Rust half done (`decode_json`/`decode_and_validate` in `fulmen-schema`, own byte-slice parser per D18); `fulmen-py` object materialization remains
+- [x] M2.7 Strict mode for JSON, lax coercion for query/path/headers/forms — Rust half (`decode_query`/`decode_form`/`decode_cookie`/`validate_text` in `fulmen-schema`); `fulmen-py` wiring remains
+- [x] M2.8 Depth, item count and string length limits
 - [ ] M2.9 Native encoder driven by the return type descriptor; debug-mode output checking
-- [ ] M2.10 Error collection with JSON-pointer locations, no input echo by default
+- [x] M2.10 Error collection with JSON-pointer locations, no input echo by default — `ValidationErrors::to_json`/`to_problem_entries`, `ErrorEntry::loc_pointer`/`problem`
 
 ### API surface
 
