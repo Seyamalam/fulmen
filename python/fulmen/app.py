@@ -53,11 +53,19 @@ _RouteSpec = tuple[
 
 
 class Fulmen:
-    """A Fulmen application: routes and error handlers, then `run()`."""
+    """A Fulmen application: routes and error handlers, then `run()`.
 
-    __slots__ = ("_declared", "_error_handlers")
+    `debug=True` turns on §14.2 output validation: every handler return is
+    checked against its declared response type, and a violation answers
+    `500 application/problem+json` with the validation errors (the handler
+    identity is logged). Serving flags (`run(debug=…)`, `--debug`) enable
+    the same checks for an app built without the flag.
+    """
 
-    def __init__(self) -> None:
+    __slots__ = ("_debug", "_declared", "_error_handlers")
+
+    def __init__(self, debug: bool = False) -> None:
+        self._debug = debug
         self._declared: list[tuple[str, str, _Handler]] = []
         self._error_handlers: list[tuple[type[BaseException], _Handler, bool]] = []
 
@@ -138,6 +146,10 @@ class Fulmen:
         `SO_REUSEPORT` on Linux and macOS; other platforms refuse it and
         stay single-process (DESIGN.md §7.2, decision D15).
 
+        `debug=True` turns on §14.2 output validation for this serving —
+        every handler return is checked against its declared response type
+        and violations answer `500 application/problem+json`.
+
         `uvloop` selects the event loop for `async def` handlers (§7.4):
         `None` uses uvloop when the package is installed, `False` forces
         plain asyncio, `True` requires uvloop and fails startup without it.
@@ -179,7 +191,7 @@ class Fulmen:
         raised as one `StartupError` in the same format Rust produces for
         core compile errors.
         """
-        native = NativeApp()
+        native = NativeApp(debug=self._debug)
         problems: list[str] = []
         for method, path, handler in self._declared:
             spec = _inspect_handler(method, path, handler, problems)

@@ -12,11 +12,16 @@
 //! *deferred*: the executor answers [`JobAnswer::Deferred`] and the
 //! dispatcher re-submits the error handler onto the matching executor.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fulmen_schema::errors::ValidationErrors;
+use fulmen_schema::desc::Kind;
+use fulmen_schema::encode_json;
+use fulmen_schema::errors::{Source, ValidationErrors};
 use fulmen_schema::value::{LiteralValue, Value};
+use fulmen_schema::{Mode, Validator};
 use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use http::{HeaderMap, StatusCode};
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -24,6 +29,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
 
 use crate::descriptor::{self, Descriptor};
+use crate::dispatch::{ResponseContract, ResponseVariant};
+use crate::encode::{self, EncCtx, EncodeError, ShapeError};
 use crate::json::{self, JsonValue};
 
 /// `text/plain; charset=utf-8`, the §10.2 content type for `str` results.
@@ -90,6 +97,9 @@ pub(crate) enum PyReturn {
     /// JSON-serializable (`dict`/`list`/`tuple`/`Model`/scalars) → `200
     /// application/json`.
     Json(JsonValue),
+    /// A body already encoded to JSON bytes by the descriptor-driven
+    /// walker (§11.6) — no `JsonValue` round-trip.
+    Encoded(Vec<u8>),
     /// `fulmen.Response`: explicit status/headers plus a converted body
     /// (`None` body means an empty response body) and optional
     /// `content_type` override.
@@ -214,6 +224,11 @@ pub(crate) struct PyCtx<'a> {
     pub(crate) route_errors: bool,
     /// `"{METHOD} {path}"` identifying the route in log lines.
     pub(crate) label: &'a str,
+    /// The route's declared response contract — picks the encode
+    /// descriptor by actual response status.
+    pub(crate) contract: &'a ResponseContract,
+    /// `Fulmen(debug=True)`/`serve(debug=…)` — §14.2 output validation.
+    pub(crate) debug: bool,
 }
 
 /// The outcome of [`call_and_convert`], produced inside [`Python::attach`].
@@ -428,6 +443,13 @@ fn invoke(
 }
 
 /// Convert a Python return value into [`PyReturn`].
+///
+/// A declared response contract runs first: when `response_descs`
+/// resolved a descriptor for the body, the descriptor-driven walker
+/// encodes it (§11.6) and §10.2's runtime-type channels are enforced —
+/// `-> str` returning an `int` is a contract violation, not a
+/// relabelled body. Unannotated/`Any`/`Raw` routes, and statuses the
+/// contract does not cover, keep the generic path.
 pub(crate) fn convert_result(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
@@ -439,6 +461,24 @@ pub(crate) fn convert_result(
     if obj.is_instance(ctx.response_cls.bind(py))? {
         return convert_response(py, obj, ctx);
     }
+    if let Some((status, inner)) = contract_body(py, obj, StatusCode::OK.as_u16(), ctx)? {
+        return Ok(match inner {
+            problem @ PyReturn::Problem { .. } => problem,
+            other => PyReturn::Built {
+                status: StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+                headers: Vec::new(),
+                content_type: None,
+                body: Some(Box::new(other)),
+            },
+        });
+    }
+    generic_body(py, obj)
+}
+
+/// The §10.2 generic conversion — a `str` is `text/plain`, `bytes` are
+/// `octet-stream`, everything else rides `json::extract` (the
+/// `Any`/`Raw`/unannotated behaviour).
+fn generic_body(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> Result<PyReturn, PyErr> {
     if let Ok(s) = obj.cast::<PyString>() {
         return Ok(PyReturn::Text(s.to_str()?.to_owned()));
     }
@@ -449,6 +489,302 @@ pub(crate) fn convert_result(
         Ok(v) => Ok(PyReturn::Json(v)),
         Err(json::ExtractError::Unsupported(what)) => Ok(PyReturn::Unsupported(what)),
         Err(json::ExtractError::Python(err)) => Err(err),
+    }
+}
+
+/// Encode `obj` under the contract's descriptor(s) for `status`.
+///
+/// Returns `Some((declared_status, return))` when a descriptor handled
+/// the value, `None` when the generic path applies — either because the
+/// contract declares no descriptor for `status`, or every candidate is
+/// `Any`/`Raw`. Same-status unions (`-> A | B`) try each declared
+/// variant in order; the first whose shape fits encodes.
+///
+/// §10.2's channels survive the contract: `str`-typed variants answer
+/// `Text`, `bytes` answer `Octets` — the descriptor still checks the
+/// shape first, so a declared `-> str` route returning `int` is a
+/// contract violation (500), not a quietly text/plain'd number.
+fn contract_body(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    status: u16,
+    ctx: &PyCtx<'_>,
+) -> Result<Option<(u16, PyReturn)>, PyErr> {
+    let candidates = contract_candidates(ctx.contract, status);
+    if candidates.is_empty() {
+        // The route declared statuses (typed variants) but not this
+        // one — generic encoding is the §13 escape; a debug warning is
+        // all the contract contributes.
+        if ctx.debug && ctx.contract.has_status_contract() {
+            log_message(
+                py,
+                ctx.logger,
+                format!(
+                    "{}: response body at status {status} has no declared variant — encoding generically",
+                    ctx.label
+                ),
+            );
+        }
+        return Ok(None);
+    }
+    let mut generic = false;
+    let mut first_shape: Option<ShapeError> = None;
+    for variant in candidates {
+        let Some(desc_py) = variant.desc.as_ref() else {
+            continue;
+        };
+        let desc = desc_py.bind(py).borrow();
+        match try_variant(py, obj, desc.type_desc(), desc.callbacks(), ctx)? {
+            TryOut::Generic => generic = true,
+            TryOut::Shape(err) => {
+                if first_shape.is_none() {
+                    first_shape = Some(err);
+                }
+            }
+            TryOut::Done(chan, value) => {
+                if ctx.debug {
+                    if let Err(errors) = output_check(variant, &value) {
+                        log_message(
+                            py,
+                            ctx.logger,
+                            format!(
+                                "{}: response failed output validation ({} error{})",
+                                ctx.label,
+                                errors.len(),
+                                if errors.len() == 1 { "" } else { "s" },
+                            ),
+                        );
+                        return Ok(Some((
+                            StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                            PyReturn::Problem {
+                                status: StatusCode::INTERNAL_SERVER_ERROR,
+                                headers: Vec::new(),
+                                body: problem_json(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    RESPONSE_PROBLEM_TYPE,
+                                    "Response validation failed",
+                                    Some(format!(
+                                        "handler `{}` returned a body violating its declared response type",
+                                        ctx.label
+                                    )),
+                                    Some(&errors),
+                                ),
+                            },
+                        )));
+                    }
+                }
+                let ret = match chan {
+                    Chan::Text => PyReturn::Text(value_string(&value)),
+                    Chan::Octets => PyReturn::Octets(value_bytes(&value)),
+                    Chan::Json => PyReturn::Encoded(encode_json(&value)),
+                };
+                return Ok(Some((variant.status.unwrap_or(200), ret)));
+            }
+        }
+    }
+    if generic {
+        return Ok(None);
+    }
+    contract_violation(py, first_shape, ctx)
+}
+
+/// The descriptor-bearing variants eligible for a body at `status`:
+/// every exact-status variant first (so `-> A | B` picks by shape),
+/// else the single declared descriptor (a bare `-> User` body travels
+/// as a `User` whatever status the `Response` object chose), else the
+/// route's single 200-variant.
+fn contract_candidates(
+    contract: &ResponseContract,
+    status: u16,
+) -> Vec<&ResponseVariant> {
+    let exact: Vec<_> = contract
+        .variants
+        .iter()
+        .filter(|v| v.status == Some(status) && v.desc.is_some())
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    let declared: Vec<_> = contract
+        .variants
+        .iter()
+        .filter(|v| v.desc.is_some())
+        .collect();
+    if declared.len() == 1 {
+        return declared;
+    }
+    contract
+        .variants
+        .iter()
+        .filter(|v| v.status == Some(StatusCode::OK.as_u16()) && v.desc.is_some())
+        .take(1)
+        .collect()
+}
+
+/// How one variant handled the body.
+enum TryOut {
+    /// The value encoded under the variant; carries its §10.2 channel
+    /// and the wire-shaped `Value` (for the debug validation pass).
+    Done(Chan, Value<'static>),
+    /// The shape does not fit this variant — try the next one.
+    Shape(ShapeError),
+    /// The variant is `Any`/`Raw` — defer to the generic path.
+    Generic,
+}
+
+/// §10.2's body channels: `str` is text, `bytes` is octets, the rest is
+/// `application/json`.
+enum Chan {
+    /// `text/plain; charset=utf-8` — a `Value::Str` rendered raw.
+    Text,
+    /// `application/octet-stream` — a `Value::Bytes` rendered raw.
+    Octets,
+    /// `application/json` — the `Value` run through `encode_json`.
+    Json,
+}
+
+/// Try `obj` against one variant's descriptor: §10.2 channels for the
+/// declared scalar kinds, the §11.6 walker for everything else.
+fn try_variant(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    ty: &fulmen_schema::TypeDesc,
+    callbacks: &[Py<PyAny>],
+    _ctx: &PyCtx<'_>,
+) -> Result<TryOut, PyErr> {
+    match &ty.kind {
+        Kind::Any | Kind::Raw => Ok(TryOut::Generic),
+        Kind::Str(_) | Kind::Email | Kind::Url => match obj.cast::<PyString>() {
+            Ok(s) => Ok(TryOut::Done(
+                Chan::Text,
+                Value::string(s.to_str()?.to_owned()),
+            )),
+            Err(_) => Ok(TryOut::Shape(ShapeError::expected("str", obj))),
+        },
+        Kind::Bytes(_) => {
+            if let Ok(b) = obj.cast::<PyBytes>() {
+                return Ok(TryOut::Done(
+                    Chan::Octets,
+                    Value::Bytes(Cow::Owned(b.as_bytes().to_vec())),
+                ));
+            }
+            if let Ok(b) = obj.cast::<pyo3::types::PyByteArray>() {
+                return Ok(TryOut::Done(
+                    Chan::Octets,
+                    Value::Bytes(Cow::Owned(b.to_vec())),
+                ));
+            }
+            Ok(TryOut::Shape(ShapeError::expected("bytes", obj)))
+        }
+        _ => {
+            let enc_ctx = EncCtx { callbacks };
+            let scope = HashMap::new();
+            match encode::encode(py, obj, ty, &enc_ctx, &scope, 0) {
+                Ok(value) => Ok(TryOut::Done(Chan::Json, value)),
+                Err(EncodeError::Shape(err)) => Ok(TryOut::Shape(err)),
+                Err(EncodeError::Python(err)) => Err(err),
+            }
+        }
+    }
+}
+
+/// The debug output check (§14.2): the wire-shaped `Value` validated
+/// against the variant's compiled validator in strict mode. Errors mean
+/// the handler's return violates its declared contract.
+fn output_check(
+    variant: &ResponseVariant,
+    value: &Value<'static>,
+) -> Result<(), ValidationErrors> {
+    let Some(validator) = variant.validator.as_ref() else {
+        return Ok(());
+    };
+    match validate_response(validator, value) {
+        Ok(()) => Ok(()),
+        Err(errors) => Err(errors),
+    }
+}
+
+/// `validator.validate_out(value, Response, Strict)` — the §14.2 output
+/// pass, GIL-free.
+fn validate_response(
+    validator: &Arc<Validator>,
+    value: &Value<'static>,
+) -> Result<(), ValidationErrors> {
+    validator
+        .validate_out(value, Source::Response, Mode::Strict)
+        .map(|_| ())
+}
+
+/// Every candidate declared a concrete shape and `obj` fit none — a
+/// contract violation. Debug mode answers the §11.7-shaped problem
+/// document; non-debug raises so the ordinary
+/// `error converting result` path logs and answers `500`.
+fn contract_violation(
+    py: Python<'_>,
+    first: Option<ShapeError>,
+    ctx: &PyCtx<'_>,
+) -> Result<Option<(u16, PyReturn)>, PyErr> {
+    let shape = first.unwrap_or_else(|| ShapeError {
+        loc: Vec::new(),
+        code: fulmen_schema::ErrorCode::Type,
+        message: "response body matches no declared variant".to_owned(),
+    });
+    if !ctx.debug {
+        return Err(PyTypeError::new_err(format!(
+            "{}: {}",
+            shape.pointer(),
+            shape.message
+        )));
+    }
+    let mut errors = ValidationErrors::new();
+    errors.fail(
+        Source::Response,
+        shape.loc.clone(),
+        shape.code,
+        shape.message.clone(),
+        None,
+    );
+    log_message(
+        py,
+        ctx.logger,
+        format!(
+            "{}: response failed the declared contract: {}",
+            ctx.label,
+            shape.message,
+        ),
+    );
+    Ok(Some((
+        StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+        PyReturn::Problem {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            headers: Vec::new(),
+            body: problem_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                RESPONSE_PROBLEM_TYPE,
+                "Response validation failed",
+                Some(format!(
+                    "handler `{}` returned a body violating its declared response type",
+                    ctx.label
+                )),
+                Some(&errors),
+            ),
+        },
+    )))
+}
+
+/// The `Value::Str` a `Chan::Text` body always carries.
+fn value_string(value: &Value<'static>) -> String {
+    match value {
+        Value::Str(s) => s.as_ref().to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// The `Value::Bytes` a `Chan::Octets` body always carries.
+fn value_bytes(value: &Value<'static>) -> Vec<u8> {
+    match value {
+        Value::Bytes(b) => b.as_ref().to_vec(),
+        _ => Vec::new(),
     }
 }
 
@@ -502,18 +838,26 @@ fn convert_response(
         // `Stream` bodies are sync iterables of bytes/str — buffered
         // (native streaming is M5.x, DESIGN.md deviation note).
         Some(Box::new(buffer_iter(py, &body_obj)?))
+    } else if body_obj.is_instance(ctx.response_cls.bind(py))? {
+        // A `Response` inside a body is a misuse — answer unsupported.
+        return Ok(PyReturn::Unsupported("Response".to_owned()));
     } else {
-        match convert_result(py, &body_obj, ctx)? {
-            ret @ (PyReturn::Text(_) | PyReturn::Octets(_) | PyReturn::Json(_)) => {
-                Some(Box::new(ret))
-            }
+        // The body's descriptor is selected by the *actual* status —
+        // `Response(status=404, body=e)` under `-> User | NotFound[Err]`
+        // encodes `e` as `Err`.
+        let converted = match contract_body(py, &body_obj, status.as_u16(), ctx)? {
+            Some((_declared, inner)) => inner,
+            None => generic_body(py, &body_obj)?,
+        };
+        match converted {
+            ret @ (PyReturn::Text(_)
+            | PyReturn::Octets(_)
+            | PyReturn::Json(_)
+            | PyReturn::Encoded(_)) => Some(Box::new(ret)),
             // A plain `Response` carrying a non-JSON-able iterable buffers
             // like `Stream` does.
             PyReturn::Unsupported(_) if body_obj.hasattr("__iter__")? => {
                 Some(Box::new(buffer_iter(py, &body_obj)?))
-            }
-            PyReturn::Built { .. } => {
-                return Ok(PyReturn::Unsupported("Response".to_owned()));
             }
             other => return Ok(other),
         }
@@ -552,6 +896,7 @@ pub(crate) fn into_response(ret: PyReturn) -> fulmen_server::Response {
         PyReturn::Text(s) => typed(StatusCode::OK, CT_TEXT, Bytes::from(s)),
         PyReturn::Octets(b) => typed(StatusCode::OK, CT_OCTETS, Bytes::from(b)),
         PyReturn::Json(v) => typed(StatusCode::OK, CT_JSON, Bytes::from(json::write(&v))),
+        PyReturn::Encoded(b) => typed(StatusCode::OK, CT_JSON, Bytes::from(b)),
         PyReturn::Problem {
             status,
             headers,
@@ -606,8 +951,9 @@ fn render(ret: PyReturn) -> (HeaderValue, Bytes) {
             HeaderValue::from_static(CT_JSON),
             Bytes::from(json::write(&v)),
         ),
-        // Unreachable: `Response.body` conversion only keeps the three
-        // variants above (see `convert_response`).
+        PyReturn::Encoded(b) => (HeaderValue::from_static(CT_JSON), Bytes::from(b)),
+        // Unreachable: `Response.body` conversion only keeps the
+        // text/octets/json variants above (see `convert_response`).
         _ => (HeaderValue::from_static(CT_OCTETS), Bytes::new()),
     }
 }
@@ -626,16 +972,20 @@ fn typed(status: StatusCode, content_type: &'static str, body: Bytes) -> fulmen_
 /// The problem-document `type` for request-validation failures (§11.7).
 pub(crate) const VALIDATION_PROBLEM_TYPE: &str = "https://fulmen.dev/problems/validation";
 
-/// An RFC 9457 `application/problem+json` response for the bridge's own
-/// error paths — the same shape `fulmen.errors.problem_for` produces for
-/// raised `HTTPError`s (§17: native and Python errors share the format).
-pub(crate) fn problem_response(
+/// The problem-document `type` for response-contract failures — the
+/// debug-mode `500` a handler violating its declared response type gets.
+const RESPONSE_PROBLEM_TYPE: &str = "https://fulmen.dev/problems/response";
+
+/// The problem document as a [`JsonValue`] — shared by the wire
+/// [`problem_response`] builder and the debug output-violation path,
+/// which wraps it in [`PyReturn::Problem`].
+fn problem_json(
     status: StatusCode,
     type_uri: &str,
     title: &str,
     detail: Option<String>,
     errors: Option<&ValidationErrors>,
-) -> fulmen_server::Response {
+) -> JsonValue {
     let mut pairs = vec![
         ("type".to_owned(), JsonValue::Str(type_uri.to_owned())),
         ("title".to_owned(), JsonValue::Str(title.to_owned())),
@@ -650,11 +1000,26 @@ pub(crate) fn problem_response(
     if let Some(errors) = errors {
         pairs.push(("errors".to_owned(), errors_json(errors)));
     }
+    JsonValue::Dict(pairs)
+}
+
+/// An RFC 9457 `application/problem+json` response for the bridge's own
+/// error paths — the same shape `fulmen.errors.problem_for` produces for
+/// raised `HTTPError`s (§17: native and Python errors share the format).
+pub(crate) fn problem_response(
+    status: StatusCode,
+    type_uri: &str,
+    title: &str,
+    detail: Option<String>,
+    errors: Option<&ValidationErrors>,
+) -> fulmen_server::Response {
     let mut response = fulmen_server::Response::status(status);
     response
         .headers
         .insert(CONTENT_TYPE, HeaderValue::from_static(CT_PROBLEM));
-    response.body = Bytes::from(json::write(&JsonValue::Dict(pairs)));
+    response.body = Bytes::from(json::write(&problem_json(
+        status, type_uri, title, detail, errors,
+    )));
     response
 }
 

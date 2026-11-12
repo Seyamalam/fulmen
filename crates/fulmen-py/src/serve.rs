@@ -22,6 +22,7 @@ use crate::convert::log_message;
 /// startup when uvloop is missing. `gil_batch_size` tunes the sync pool's
 /// GIL batching (§7.5). `reuse_port` binds with
 /// `SO_REUSEPORT` so worker processes can share `host:port` (§7.2, M1.23).
+/// `debug` turns on §14.2 output validation.
 ///
 /// # Errors
 /// `StartupError` for declaration problems, `ValueError` for an invalid
@@ -42,11 +43,11 @@ pub(crate) fn serve(
     gil_batch_size: usize,
     reuse_port: bool,
 ) -> PyResult<()> {
-    let _ = debug; // accepted for API stability; debug behaviour is M2+.
     let native = app.borrow();
     let config_bridge = BridgeConfig {
         uvloop,
         gil_batch_size,
+        debug,
     };
     let compiled = compile_app(py, &native, &config_bridge)?;
     let logger = std::sync::Arc::clone(&compiled.inner.logger);
@@ -130,16 +131,19 @@ impl Drop for TestServer {
 /// test runner's `SIGINT`. `uvloop` selects the asyncio loop
 /// implementation exactly like [`serve`].
 ///
+/// `debug` turns on §14.2 output validation.
+///
 /// # Errors
 /// `StartupError` for declaration problems, `ValueError` for an invalid
 /// `host`, `OSError` when the bind or the server fails.
 #[pyfunction]
-#[pyo3(signature = (app, host="127.0.0.1", uvloop=None))]
+#[pyo3(signature = (app, host="127.0.0.1", uvloop=None, debug=false))]
 pub(crate) fn serve_for_test(
     py: Python<'_>,
     app: &Bound<'_, NativeApp>,
     host: &str,
     uvloop: Option<bool>,
+    debug: bool,
 ) -> PyResult<TestServer> {
     let native = app.borrow();
     let compiled = compile_app(
@@ -147,6 +151,7 @@ pub(crate) fn serve_for_test(
         &native,
         &BridgeConfig {
             uvloop,
+            debug,
             ..BridgeConfig::default()
         },
     )?;

@@ -149,22 +149,36 @@ impl CallSpecArg {
 }
 
 /// One member of a handler's declared response set — `(status, body)`;
-/// `(None, None)` is the dynamic `Response` escape. Stored for the
-/// `OpenAPI` and debug-check tasks; dispatch does not read it.
+/// `(None, None)` is the dynamic `Response` escape (DESIGN.md §13).
 #[derive(Debug)]
-pub(crate) struct ResponseDesc {
+pub(crate) struct ResponseVariant {
     /// The declared status (`None` — dynamic `Response`).
-    #[expect(
-        dead_code,
-        reason = "consumed by the M2.11 `OpenAPI` encoder, not dispatch"
-    )]
     pub(crate) status: Option<u16>,
-    /// The declared body's descriptor, when the variant carries one.
-    #[expect(
-        dead_code,
-        reason = "consumed by the M2.11 `OpenAPI` encoder, not dispatch"
-    )]
+    /// The declared body's descriptor, when the variant carries one —
+    /// also what `OpenAPI` reads its schema from.
     pub(crate) desc: Option<Arc<Py<Descriptor>>>,
+    /// `desc`'s compiled validator, split out at compile so the debug
+    /// check runs without re-borrowing the `Descriptor` per request.
+    pub(crate) validator: Option<Arc<Validator>>,
+}
+
+/// A route's declared response contract: the `response_descs` set
+/// `response_spec()` compiled, resolved per actual response status by
+/// `convert::contract_candidates`.
+#[derive(Debug, Default)]
+pub(crate) struct ResponseContract {
+    /// The declared variants, in declaration order.
+    pub(crate) variants: Box<[ResponseVariant]>,
+}
+
+impl ResponseContract {
+    /// `true` when the route declared concrete statuses (so a body that
+    /// matches none deserves a debug warning); `-> Response` and
+    /// unannotated routes both answer `false` — generic encoding is the
+    /// declared behaviour there.
+    pub(crate) fn has_status_contract(&self) -> bool {
+        self.variants.iter().any(|v| v.status.is_some())
+    }
 }
 
 /// One entry in the handler table, indexed by `RouteInfo::handler_index`.
@@ -179,12 +193,9 @@ pub(crate) struct HandlerEntry {
     pub(crate) none_ok: bool,
     /// The parameters' extraction spec, signature order.
     pub(crate) call_spec: Box<[CallSpecArg]>,
-    /// The declared response variants (`OpenAPI`/debug checking).
-    #[expect(
-        dead_code,
-        reason = "consumed by the M2.11 `OpenAPI` encoder, not dispatch"
-    )]
-    pub(crate) response_descs: Box<[ResponseDesc]>,
+    /// The declared response contract — descriptor-driven encoding and
+    /// debug-mode output validation read it.
+    pub(crate) response_contract: Arc<ResponseContract>,
 }
 
 /// Everything one running server needs on top of the frozen route table.
@@ -200,6 +211,10 @@ pub(crate) struct AppInner {
     pub(crate) pool: SyncPool,
     /// The asyncio loop thread; `Some` only when the app has async routes.
     pub(crate) async_loop: Option<AsyncLoop>,
+    /// The empty contract shared by `on_error` deferred calls — error
+    /// handlers carry no response spec, so their results always encode
+    /// generically.
+    pub(crate) empty_contract: Arc<ResponseContract>,
 }
 
 /// The `Dispatcher` handed to `fulmen_server::serve`.
@@ -358,6 +373,7 @@ impl AppInner {
                 &entry.callable,
                 args,
                 format!("{method} {path}").into_boxed_str(),
+                Arc::clone(&entry.response_contract),
                 entry.none_ok,
                 true,
             )
@@ -377,6 +393,7 @@ impl AppInner {
                             &call.callable,
                             args,
                             call.label,
+                            Arc::clone(&self.empty_contract),
                             false,
                             false,
                         )
@@ -387,14 +404,20 @@ impl AppInner {
     }
 
     /// Put one call on the sync pool or the asyncio loop and await the
-    /// job's oneshot. `none_ok`/`route_errors` ride the job (a deferred
-    /// `on_error` call always submits with both `false`).
+    /// job's oneshot. `contract`/`none_ok`/`route_errors` ride the job (a
+    /// deferred `on_error` call always submits the empty contract with
+    /// both flags `false`).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per job field; the job itself is the executor's type"
+    )]
     async fn submit(
         &self,
         is_async: bool,
         callable: &Arc<Py<PyAny>>,
         args: Box<[ParamArg]>,
         label: Box<str>,
+        contract: Arc<ResponseContract>,
         none_ok: bool,
         route_errors: bool,
     ) -> JobAnswer {
@@ -407,7 +430,15 @@ impl AppInner {
                 return JobAnswer::Response(convert::internal_error());
             };
             let (tx, rx) = oneshot::channel();
-            match loop_thread.submit(Arc::clone(callable), args, label, none_ok, route_errors, tx) {
+            match loop_thread.submit(
+                Arc::clone(callable),
+                args,
+                label,
+                contract,
+                none_ok,
+                route_errors,
+                tx,
+            ) {
                 Ok(()) => rx
                     .await
                     .unwrap_or_else(|_| JobAnswer::Response(convert::internal_error())),
@@ -423,6 +454,7 @@ impl AppInner {
                 args,
                 label,
                 enqueued: Instant::now(),
+                contract,
                 none_ok,
                 route_errors,
                 respond: tx,

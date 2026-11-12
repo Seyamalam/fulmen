@@ -903,11 +903,12 @@ def _response_variants(builder: SpecBuilder, hint: Any, out: list[ResponseVarian
         for member in args:
             _response_variants(builder, member, out)
         return
-    out.append(_one_response_variant(builder, base, origin, args))
+    out.append(_one_response_variant(builder, hint, base, origin, args))
 
 
 def _one_response_variant(
     builder: SpecBuilder,
+    hint: Any,
     base: Any,
     origin: Any,
     args: tuple[Any, ...],
@@ -927,7 +928,9 @@ def _one_response_variant(
             status: int | None = getattr(cls, "status_code", None)
             body = builder.type_spec(cls_args[0], "response") if cls_args else None
             return ResponseVariant(status, body)
-    return ResponseVariant(200, builder.type_spec(base, "response"))
+    # `hint`, not `base` — top-level `Annotated[...]` markers are part of
+    # the declared response contract (debug output validation reads them).
+    return ResponseVariant(200, builder.type_spec(hint, "response"))
 
 
 def compile_model(cls: type[Any], rename: str | None = None) -> Descriptor:
