@@ -10,6 +10,15 @@ exists. Move the `Unreleased` entries under the new version heading first.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
+Milestone M2 — "types". Handler signatures are the contract: every
+parameter source and every declared return runs through the same
+`TypeDesc` descriptor compiled once at startup — validation, encoding
+and OpenAPI all read one IR. Results in `benches/results/0.2.0.md`:
+validated bodies are never Python-bound until they pass, and 422s never
+enter Python at all (0 handler calls, ~96% of the pure-Rust bound).
+
 ### Added
 
 - Schema decoding + source adapters (`fulmen-schema`, M2.6–M2.8 + M2.10,
