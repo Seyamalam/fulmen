@@ -132,7 +132,7 @@ class Discriminator:
 
 
 @dataclasses.dataclass(frozen=True)
-class _FieldSpec:
+class FieldSpec:
     """What `Field(...)` returns — merged into the param/field spec."""
 
     default: Any = UNSET
@@ -154,7 +154,7 @@ class _FieldSpec:
     unique: bool = False
 
 
-def Field(
+def Field(  # noqa: N802 -- the API mirrors dataclasses.field/pydantic Field
     default: Any = UNSET,
     *,
     default_factory: Callable[[], Any] | None = None,
@@ -182,7 +182,7 @@ def Field(
     """
     if default is not UNSET and default_factory is not None:
         raise ValueError("Field() cannot take both `default` and `default_factory`")
-    return _FieldSpec(
+    return FieldSpec(
         default=default,
         default_factory=default_factory,
         alias=alias,

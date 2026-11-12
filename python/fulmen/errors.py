@@ -9,12 +9,10 @@ A handler that raises `HTTPError` (or a shortcut) gets an
 from __future__ import annotations
 
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
-    from typing import TypedDict
-
-    from typing_extensions import NotRequired
+    from typing import NotRequired, TypedDict
 
     class ErrorDetail(TypedDict):
         loc: str
@@ -22,9 +20,6 @@ if TYPE_CHECKING:
         message: str
         source: str
         limit: NotRequired[Any]
-
-
-_T = TypeVar("_T")
 
 
 class ValidationError(ValueError):
@@ -41,7 +36,7 @@ class ValidationError(ValueError):
         super().__init__(f"{len(entries)} validation error(s){suffix}")
 
 
-class HTTPError(Exception, Generic[_T]):
+class HTTPError[T](Exception):
     """An HTTP error → `application/problem+json` (DESIGN.md §13.3).
 
     ```python
@@ -66,7 +61,7 @@ class HTTPError(Exception, Generic[_T]):
         if status is not None:
             self.status = status
         else:
-            self.status = type(self).status_code
+            self.status = self.__class__.status_code
         self.detail = detail
         self.type = type
         self.title = title
@@ -101,90 +96,90 @@ class HTTPError(Exception, Generic[_T]):
 # ---- client-error shortcuts (§13.3 list) --------------------------------------
 
 
-class BadRequest(HTTPError[_T]):
+class BadRequest[T](HTTPError[T]):
     status_code: ClassVar[int] = 400
 
 
-class Unauthorized(HTTPError[_T]):
+class Unauthorized[T](HTTPError[T]):
     status_code: ClassVar[int] = 401
 
 
-class Forbidden(HTTPError[_T]):
+class Forbidden[T](HTTPError[T]):
     status_code: ClassVar[int] = 403
 
 
-class NotFound(HTTPError[_T]):
+class NotFound[T](HTTPError[T]):
     status_code: ClassVar[int] = 404
 
 
-class MethodNotAllowed(HTTPError[_T]):
+class MethodNotAllowed[T](HTTPError[T]):
     status_code: ClassVar[int] = 405
 
 
-class NotAcceptable(HTTPError[_T]):
+class NotAcceptable[T](HTTPError[T]):
     status_code: ClassVar[int] = 406
 
 
-class RequestTimeout(HTTPError[_T]):
+class RequestTimeout[T](HTTPError[T]):
     status_code: ClassVar[int] = 408
 
 
-class Conflict(HTTPError[_T]):
+class Conflict[T](HTTPError[T]):
     status_code: ClassVar[int] = 409
 
 
-class Gone(HTTPError[_T]):
+class Gone[T](HTTPError[T]):
     status_code: ClassVar[int] = 410
 
 
-class LengthRequired(HTTPError[_T]):
+class LengthRequired[T](HTTPError[T]):
     status_code: ClassVar[int] = 411
 
 
-class PreconditionFailed(HTTPError[_T]):
+class PreconditionFailed[T](HTTPError[T]):
     status_code: ClassVar[int] = 412
 
 
-class PayloadTooLarge(HTTPError[_T]):
+class PayloadTooLarge[T](HTTPError[T]):
     status_code: ClassVar[int] = 413
 
 
-class URITooLong(HTTPError[_T]):
+class URITooLong[T](HTTPError[T]):
     status_code: ClassVar[int] = 414
 
 
-class UnsupportedMediaType(HTTPError[_T]):
+class UnsupportedMediaType[T](HTTPError[T]):
     status_code: ClassVar[int] = 415
 
 
-class UnprocessableContent(HTTPError[_T]):
+class UnprocessableContent[T](HTTPError[T]):
     status_code: ClassVar[int] = 422
 
 
-class TooManyRequests(HTTPError[_T]):
+class TooManyRequests[T](HTTPError[T]):
     status_code: ClassVar[int] = 429
 
 
 # ---- server-error shortcuts ----------------------------------------------------
 
 
-class InternalServerError(HTTPError[_T]):
+class InternalServerError[T](HTTPError[T]):
     status_code: ClassVar[int] = 500
 
 
-class NotImplemented(HTTPError[_T]):
+class NotImplemented[T](HTTPError[T]):
     status_code: ClassVar[int] = 501
 
 
-class BadGateway(HTTPError[_T]):
+class BadGateway[T](HTTPError[T]):
     status_code: ClassVar[int] = 502
 
 
-class ServiceUnavailable(HTTPError[_T]):
+class ServiceUnavailable[T](HTTPError[T]):
     status_code: ClassVar[int] = 503
 
 
-class GatewayTimeout(HTTPError[_T]):
+class GatewayTimeout[T](HTTPError[T]):
     status_code: ClassVar[int] = 504
 
 

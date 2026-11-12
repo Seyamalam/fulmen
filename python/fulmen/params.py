@@ -14,12 +14,12 @@ readable to type checkers while the runtime still sees the marker.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, ClassVar
+from typing import Annotated, Any, ClassVar, cast
 
 from fulmen.constraints import UNSET
 
 
-class _Marker:
+class Marker:
     """Base for source markers: `Path`, `Query`, `Header`, `Cookie`,
     `Body`, `Form`, `File`."""
 
@@ -67,7 +67,7 @@ class _Marker:
         # `Query[int]` -> Annotated[int, Query()];
         # `Header[str, "X-Api-Key"]` -> Annotated[str, Header(alias="X-Api-Key")].
         if isinstance(item, tuple):
-            hint, alias = item
+            hint, alias = cast("tuple[Any, Any]", item)
             if not isinstance(alias, str):
                 raise TypeError(
                     f"{cls.__name__}[T, name]: the wire name must be a str, got {alias!r}"
@@ -80,43 +80,43 @@ class _Marker:
         return f"{type(self).__name__}({args})"
 
 
-class Path(_Marker):
+class Path(Marker):
     """A path-template parameter (extracted from the matched URL segment)."""
 
     source: ClassVar[str] = "path"
 
 
-class Query(_Marker):
+class Query(Marker):
     """A query-string parameter (`?page=2`)."""
 
     source: ClassVar[str] = "query"
 
 
-class Header(_Marker):
+class Header(Marker):
     """A request header parameter (`Header[str, "X-Api-Key"]` renames it)."""
 
     source: ClassVar[str] = "header"
 
 
-class Cookie(_Marker):
+class Cookie(Marker):
     """A request cookie parameter."""
 
     source: ClassVar[str] = "cookie"
 
 
-class Body(_Marker):
+class Body(Marker):
     """A request body parameter (a `Model`/dataclass/`TypedDict`/container)."""
 
     source: ClassVar[str] = "body"
 
 
-class Form(_Marker):
+class Form(Marker):
     """A `application/x-www-form-urlencoded` field (the form task)."""
 
     source: ClassVar[str] = "form"
 
 
-class File(_Marker):
+class File(Marker):
     """A `multipart/form-data` file field producing `bytes` or `UploadFile`."""
 
     source: ClassVar[str] = "file"

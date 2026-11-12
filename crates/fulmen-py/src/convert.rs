@@ -498,13 +498,17 @@ fn convert_response(
     let body_obj = obj.getattr("body")?;
     let body = if body_obj.is_none() {
         None
+    } else if obj.is_instance(descriptor::stream_class(py)?.bind(py))? {
+        // `Stream` bodies are sync iterables of bytes/str — buffered
+        // (native streaming is M5.x, DESIGN.md deviation note).
+        Some(Box::new(buffer_iter(py, &body_obj)?))
     } else {
         match convert_result(py, &body_obj, ctx)? {
             ret @ (PyReturn::Text(_) | PyReturn::Octets(_) | PyReturn::Json(_)) => {
                 Some(Box::new(ret))
             }
-            // `Stream` bodies are sync iterables of bytes/str — buffered
-            // (native streaming is M5.x, DESIGN.md deviation note).
+            // A plain `Response` carrying a non-JSON-able iterable buffers
+            // like `Stream` does.
             PyReturn::Unsupported(_) if body_obj.hasattr("__iter__")? => {
                 Some(Box::new(buffer_iter(py, &body_obj)?))
             }

@@ -8,14 +8,11 @@ and class kwargs (`frozen`, `extra`, `rename`) shape the spec.
 
 from __future__ import annotations
 
-import dataclasses
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar, cast, dataclass_transform
 
 from fulmen import _typing
+from fulmen._fulmen import Descriptor
 from fulmen.constraints import Field
-
-if TYPE_CHECKING:
-    from fulmen._fulmen import Descriptor
 
 _T = TypeVar("_T")
 
@@ -48,7 +45,7 @@ class Model:
     __model_strict__: ClassVar[bool] = True
     __model_config__: ClassVar[ModelConfig]
 
-    @dataclasses.dataclass_transform(kw_only_default=True, field_specifiers=(Field,))
+    @dataclass_transform(kw_only_default=True, field_specifiers=(Field,))
     def __init_subclass__(
         cls,
         *,
@@ -68,10 +65,10 @@ class Model:
                 f"{cls.__qualname__}: rename must be 'camel', 'pascal' or 'kebab', got {rename!r}"
             )
         cls.__fulmen_model__ = True
-        config = cls.__dict__.get("__model_config__") or {}
+        config = cast(ModelConfig, cls.__dict__.get("__model_config__") or ModelConfig())
         cls.__model_frozen__ = bool(config.get("frozen", frozen))
         cls.__model_extra__ = str(config.get("extra", extra))
-        cls.__model_rename__ = config.get("rename", rename)
+        cls.__model_rename__ = cast("str | None", config.get("rename", rename))
         cls.__model_strict__ = bool(config.get("strict", strict))
         cls.__descriptor__ = None
         cls.__spec__ = None
@@ -89,7 +86,7 @@ class Model:
     def __init__(self, /, **kwargs: Any) -> None:
         cls = type(self)
         descriptor = _typing.model_descriptor(cls)
-        descriptor.construct(self, kwargs, not cls.__model_strict__)
+        descriptor.construct(self, kwargs, lax=not cls.__model_strict__)
 
     @classmethod
     def model_validate(cls: type[_T], obj: Any) -> _T:
@@ -112,10 +109,13 @@ class Model:
             value = _typing.model_descriptor(cls).validate_field(
                 name, value, lax=not cls.__model_strict__
             )
+
         object.__setattr__(self, name, value)
 
     def __eq__(self, other: Any) -> bool:
-        return type(self) is type(other) and vars(self) == vars(other)
+        if type(other) is not type(self):
+            return False
+        return vars(self) == vars(cast(Model, other))
 
     def __repr__(self) -> str:
         parts = ", ".join(f"{k}={v!r}" for k, v in vars(self).items())

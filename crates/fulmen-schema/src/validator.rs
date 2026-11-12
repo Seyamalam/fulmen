@@ -863,10 +863,10 @@ fn validate_items<'v>(
     unique: bool,
     ctx: &mut Ctx<'_>,
 ) -> Option<Outcome<'v>> {
-    let items: &[Value<'v>] = match input {
-        Value::Array(items) => items,
+    let (items, scalar_wrapped): (&[Value<'v>], bool) = match input {
+        Value::Array(items) => (items, false),
         // Lax promotion: a lone scalar is a one-element container.
-        _ if ctx.mode == Mode::Lax => std::slice::from_ref(input),
+        _ if ctx.mode == Mode::Lax => (std::slice::from_ref(input), true),
         _ => {
             ctx.type_err("array", input);
             return None;
@@ -914,7 +914,7 @@ fn validate_items<'v>(
             }
         }
     }
-    if all_same && out.len() == items.len() {
+    if all_same && !scalar_wrapped && out.len() == items.len() {
         Some(Outcome::Same)
     } else {
         Some(Outcome::New(Value::Array(out)))

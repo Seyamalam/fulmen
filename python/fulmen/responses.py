@@ -1,4 +1,4 @@
-"""Response objects returned from handlers (DESIGN.md §10.2–§10.3).
+"""Response objects returned from handlers (DESIGN.md §10.2-§10.3).
 
 `Response` is a plain data object: the Rust dispatcher reads `status`,
 `headers`, `body` and `content_type`. A `dict`/`list`/`tuple`/`Model` body
@@ -17,9 +17,7 @@ from __future__ import annotations
 import mimetypes
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path as _Path
-from typing import Any, ClassVar, Generic, TypeVar
-
-_T = TypeVar("_T")
+from typing import Any, ClassVar
 
 
 class Response:
@@ -56,7 +54,7 @@ class Response:
         return f"{type(self).__name__}(status={self.status}, body={self.body!r})"
 
 
-class JSONResponse(Response, Generic[_T]):
+class JSONResponse[T](Response):
     """`application/json` — the default for declared-body returns."""
 
     status_code: ClassVar[int | None] = 200
@@ -105,7 +103,7 @@ class HTMLResponse(Response):
         )
 
 
-class Created(Response, Generic[_T]):
+class Created[T](Response):
     """`201` with the declared body — `def create() -> Created[User]`."""
 
     status_code: ClassVar[int | None] = 201
@@ -114,7 +112,7 @@ class Created(Response, Generic[_T]):
         super().__init__(body, status=201, headers=headers)
 
 
-class Accepted(Response, Generic[_T]):
+class Accepted[T](Response):
     """`202` with the declared body."""
 
     status_code: ClassVar[int | None] = 202
@@ -199,4 +197,6 @@ class Stream(Response):
                 "Stream(async_iterator) needs native streaming (M5.x) — "
                 "buffer the chunks into bytes for now"
             )
+        if not hasattr(body, "__iter__"):
+            raise TypeError(f"Stream body must be a sync iterable, got {body!r}")
         super().__init__(body, status=status, headers=headers, content_type=content_type)

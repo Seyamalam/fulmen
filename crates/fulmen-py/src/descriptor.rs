@@ -105,6 +105,14 @@ pub(crate) fn http_error_class(py: Python<'_>) -> PyResult<Py<PyAny>> {
     cached(py, &HTTP_ERROR, "fulmen.errors", "HTTPError")
 }
 
+/// `fulmen.responses.Stream`, resolved once for the buffered-stream body
+/// path (a `Stream` body always joins its chunks, even when the iterable
+/// itself would be JSON-serializable).
+static STREAM: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+pub(crate) fn stream_class(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    cached(py, &STREAM, "fulmen.responses", "Stream")
+}
+
 /// `timedelta` → its canonical ISO 8601 text (shared with `json::extract`).
 pub(crate) fn delta_text(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     let days = obj.getattr("days")?.extract::<i128>()?;

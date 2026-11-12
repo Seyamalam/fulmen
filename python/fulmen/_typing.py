@@ -1,4 +1,4 @@
-"""Annotation → spec-tree conversion (DESIGN.md §11.1–§11.3).
+"""Annotation → spec-tree conversion (DESIGN.md §11.1-§11.3).
 
 Everything in this file runs once per declaration — at `Model` class
 creation and inside `Fulmen._compile_native` — and produces a *spec tree*:
@@ -16,6 +16,7 @@ import copy
 import dataclasses
 import datetime
 import enum
+import functools
 import inspect
 import ipaddress
 import types as pytypes
@@ -35,6 +36,7 @@ from fulmen.constraints import (
     Description,
     Discriminator,
     Example,
+    FieldSpec,
     Len,
     Lower,
     MultipleOf,
@@ -43,15 +45,19 @@ from fulmen.constraints import (
     Strip,
     Unique,
     Upper,
-    _FieldSpec,
 )
-from fulmen.params import Request, UploadFile, _Marker
+from fulmen.params import Marker, Request, UploadFile
 from fulmen.types import Email, Raw, Url
 
 if typing.TYPE_CHECKING:
     from fulmen._fulmen import Descriptor
 
 _NoneType = type(None)
+
+
+class AnnotationError(ValueError):
+    """An annotation cannot be expressed in the spec IR — a startup problem."""
+
 
 # Kinds that default to `query` source when the name is not a path param.
 _QUERY_KINDS = {
@@ -145,11 +151,11 @@ class SpecBuilder:
         base, markers = _peel_annotated(hint)
         node = self._base_spec(base, where)
         if markers:
-            self._apply_markers(node, markers, where)
+            self.apply_markers(node, markers, where)
         return node
 
     def _base_spec(self, hint: Any, where: str) -> dict[str, Any]:
-        if hint is Any:
+        if hint is Any or hint is object:
             return {"kind": "any"}
         if hint is None or hint is _NoneType:
             return {"kind": "none"}
@@ -203,11 +209,12 @@ class SpecBuilder:
             return self._dataclass_spec(hint)
         if typing.is_typeddict(hint):
             return self._typed_dict_spec(hint)
-        if hasattr(hint, "__supertype__"):
+        supertype = getattr(hint, "__supertype__", None)
+        if supertype is not None:
             return {
                 "kind": "newtype",
                 "name": getattr(hint, "__qualname__", "NewType").split(".")[-1],
-                "inner": self.type_spec(hint.__supertype__, where),
+                "inner": self.type_spec(supertype, where),
             }
 
         origin = get_origin(hint)
@@ -232,7 +239,7 @@ class SpecBuilder:
         if origin is Annotated:
             base, markers = _peel_annotated(hint)
             node = self._base_spec(base, where)
-            self._apply_markers(node, markers, where)
+            self.apply_markers(node, markers, where)
             return node
         if origin in (typing.Union, pytypes.UnionType):
             none = args.index(_NoneType) if _NoneType in args else -1
@@ -313,7 +320,7 @@ class SpecBuilder:
         self._building = self._building | {cls}
         try:
             hints = get_type_hints(cls, include_extras=True)
-            fields = []
+            fields: list[dict[str, Any]] = []
             for name, hint in hints.items():
                 if name.startswith("_") or get_origin(hint) is typing.ClassVar:
                     continue
@@ -342,7 +349,7 @@ class SpecBuilder:
         factory: Callable[[], Any] | None = None
         cons: dict[str, Any] = {}
         for marker in markers:
-            if isinstance(marker, _FieldSpec):
+            if isinstance(marker, FieldSpec):
                 _merge_field_spec(marker, meta, cons)
                 if marker.alias:
                     alias = marker.alias
@@ -366,7 +373,7 @@ class SpecBuilder:
                 self._collect_constraint(cons, marker, where)
             elif isinstance(marker, Discriminator):
                 raise AnnotationError(f"Discriminator belongs on a union type, not on {where}")
-            elif isinstance(marker, _Marker):
+            elif isinstance(marker, Marker):
                 raise AnnotationError(
                     f"{type(marker).__name__}() is a parameter marker — it cannot "
                     f"appear inside the model {where}"
@@ -375,7 +382,7 @@ class SpecBuilder:
                 raise AnnotationError(f"unsupported Annotated marker {marker!r} on {where}")
         self.apply_constraints(node, cons, where)
         if declared is not UNSET:
-            if isinstance(declared, _FieldSpec):
+            if isinstance(declared, FieldSpec):
                 _merge_field_spec(declared, meta, cons)
                 self.apply_constraints(node, cons, where)
                 if declared.alias:
@@ -411,7 +418,7 @@ class SpecBuilder:
             return {"literal": default}
         # Non-scalar defaults (a list, a model, a set): a per-instance copy
         # avoids the shared-mutable-default bug.
-        return {"factory": self.cb_id(lambda d=default: copy.deepcopy(d))}
+        return {"factory": self.cb_id(functools.partial(copy.deepcopy, default))}
 
     def _collect_constraint(self, cons: dict[str, Any], marker: Any, where: str) -> None:
         if isinstance(marker, Len):
@@ -420,14 +427,18 @@ class SpecBuilder:
             if marker.max is not None:
                 cons["max_length"] = marker.max
         elif isinstance(marker, Range):
-            for key, value in (
-                ("ge", marker.ge),
-                ("gt", marker.gt),
-                ("le", marker.le),
-                ("lt", marker.lt),
-            ):
-                if value is not None:
-                    cons[key] = value
+            cons.update(
+                {
+                    key: value
+                    for key, value in (
+                        ("ge", marker.ge),
+                        ("gt", marker.gt),
+                        ("le", marker.le),
+                        ("lt", marker.lt),
+                    )
+                    if value is not None
+                }
+            )
         elif isinstance(marker, Pattern):
             cons["pattern"] = marker.pattern
         elif isinstance(marker, MultipleOf):
@@ -440,7 +451,7 @@ class SpecBuilder:
         else:
             raise AnnotationError(f"unsupported constraint {marker!r} on {where}")
 
-    def _apply_markers(self, node: dict[str, Any], markers: list[Any], where: str) -> None:
+    def apply_markers(self, node: dict[str, Any], markers: list[Any], where: str) -> None:
         """Markers inside `Annotated[...]` — mid-tree only node-level
         markers are legal (param/field markers are partitioned first)."""
         cons: dict[str, Any] = {}
@@ -559,7 +570,7 @@ class SpecBuilder:
         self._building = self._building | {cls}
         try:
             hints = get_type_hints(cls, include_extras=True)
-            fields = []
+            fields: list[dict[str, Any]] = []
             for f in dataclasses.fields(cls):
                 if f.name not in hints:
                     continue
@@ -603,13 +614,25 @@ class SpecBuilder:
         self._building = self._building | {cls}
         try:
             hints = get_type_hints(cls, include_extras=True)
-            required = frozenset(getattr(cls, "__required_keys__", ()))
-            fields = []
+            # `__required_keys__` misreports under `from __future__ import
+            # annotations` (PEP 563 leaves the qualifier a string, so CPython
+            # marks every key required) — read the qualifier off the resolved
+            # hint and fall back to `__total__` for unqualified fields.
+            total = getattr(cls, "__total__", True)
+            fields: list[dict[str, Any]] = []
             for name, hint in hints.items():
                 base, markers = _peel_annotated(hint)
-                del markers  # marker pass happens in _record_field_meta
-                if get_origin(base) in (typing.Required, typing.NotRequired):
+                qualifier = get_origin(base)
+                if qualifier in (typing.Required, typing.NotRequired):
                     base = get_args(base)[0]
+                    # Keep the Annotated markers for _record_field_meta's pass.
+                    hint = Annotated[base, *markers] if markers else base
+                missing = (
+                    "omit"
+                    if qualifier is typing.NotRequired
+                    or (qualifier is not typing.Required and not total)
+                    else "required"
+                )
                 where = f"field {cls.__qualname__}.{name}"
                 node, meta = self._record_field_meta(cls, name, hint, where, allow_default=True)
                 fields.append(
@@ -617,7 +640,7 @@ class SpecBuilder:
                         "name": name,
                         "type": node,
                         "alias": None,
-                        "missing": "required" if name in required else "omit",
+                        "missing": missing,
                         "meta": meta or None,
                     }
                 )
@@ -634,27 +657,31 @@ class SpecBuilder:
             self._building = self._building - {cls}
 
 
-def _merge_field_spec(spec: _FieldSpec, meta: dict[str, Any], cons: dict[str, Any]) -> None:
+def _merge_field_spec(spec: FieldSpec, meta: dict[str, Any], cons: dict[str, Any]) -> None:
     if spec.description is not None:
         meta["description"] = spec.description
     if spec.example is not UNSET:
         meta["example"] = spec.example
     if spec.deprecated:
         meta["deprecated"] = True
-    for key, value in (
-        ("ge", spec.ge),
-        ("gt", spec.gt),
-        ("le", spec.le),
-        ("lt", spec.lt),
-        ("min_length", spec.min_length),
-        ("max_length", spec.max_length),
-        ("min_items", spec.min_items),
-        ("max_items", spec.max_items),
-        ("pattern", spec.pattern),
-        ("multiple_of", spec.multiple_of),
-    ):
-        if value is not None:
-            cons[key] = value
+    cons.update(
+        {
+            key: value
+            for key, value in (
+                ("ge", spec.ge),
+                ("gt", spec.gt),
+                ("le", spec.le),
+                ("lt", spec.lt),
+                ("min_length", spec.min_length),
+                ("max_length", spec.max_length),
+                ("min_items", spec.min_items),
+                ("max_items", spec.max_items),
+                ("pattern", spec.pattern),
+                ("multiple_of", spec.multiple_of),
+            )
+            if value is not None
+        }
+    )
     if spec.unique:
         cons["unique"] = True
 
@@ -682,25 +709,25 @@ def param_spec(
     name: str,
     hint: Any,
     default: Any,
-    pkind: inspect._ParameterKind,
+    pkind: object,
     path_names: frozenset[str],
     where: str,
 ) -> ParamInfo:
     """Convert one `inspect.Parameter` into its source/type spec."""
     base, markers = _peel_annotated(hint if hint is not inspect.Parameter.empty else Any)
     sig_default = default
-    if isinstance(sig_default, _Marker | _FieldSpec):
+    if isinstance(sig_default, Marker | FieldSpec):
         markers = [*markers, sig_default]
         sig_default = UNSET
 
-    source_marker: _Marker | None = None
+    source_marker: Marker | None = None
     default_value: Any = UNSET
     factory: Callable[[], Any] | None = None
     alias: str | None = None
     meta: dict[str, Any] = {}
     cons: dict[str, Any] = {}
     for marker in markers:
-        if isinstance(marker, _Marker):
+        if isinstance(marker, Marker):
             if source_marker is not None:
                 raise AnnotationError(
                     f"{where}: parameter `{name}` declares two source markers "
@@ -712,7 +739,7 @@ def param_spec(
                 alias = marker.alias
             if marker.default is not UNSET:
                 default_value = marker.default
-        elif isinstance(marker, _FieldSpec):
+        elif isinstance(marker, FieldSpec):
             _merge_field_spec(marker, meta, cons)
             if marker.alias:
                 alias = marker.alias
@@ -738,7 +765,7 @@ def param_spec(
     node_markers = [
         m
         for m in markers
-        if not isinstance(m, _Marker | _FieldSpec | Alias | Default | Description | Example)
+        if not isinstance(m, Marker | FieldSpec | Alias | Default | Description | Example)
         and not _is_deprecated(m)
     ]
     if base is Request:
@@ -755,7 +782,7 @@ def param_spec(
             else (source_marker.source if source_marker is not None else _default_source(node))
         )
     if node_markers:
-        builder._apply_markers(node, node_markers, where)
+        builder.apply_markers(node, node_markers, where)
     builder.apply_constraints(node, cons, f"parameter `{name}` of {where}")
     if alias is not None:
         node.setdefault("meta", {})["alias"] = alias
@@ -764,10 +791,11 @@ def param_spec(
             {k: v for k, v in meta.items() if k not in node.get("meta", {})}
         )
 
-    kind = {
-        inspect.Parameter.POSITIONAL_ONLY: "pos_only",
-        inspect.Parameter.KEYWORD_ONLY: "kw_only",
-    }.get(pkind, "normal")
+    kind = "normal"
+    if pkind is inspect.Parameter.POSITIONAL_ONLY:
+        kind = "pos_only"
+    elif pkind is inspect.Parameter.KEYWORD_ONLY:
+        kind = "kw_only"
 
     if sig_default is not UNSET and default_value is UNSET:
         default_value = sig_default
@@ -789,7 +817,7 @@ def param_spec(
         default_value is None or isinstance(default_value, bool | int | float | str | bytes)
     ):
         # Non-scalar defaults get a per-request copy, like model fields.
-        factory = factory or (lambda d=default_value: copy.deepcopy(d))
+        factory = factory or functools.partial(copy.deepcopy, default_value)
         default_value = UNSET
 
     wire = alias or (name.replace("_", "-") if source == "header" else name)
@@ -807,7 +835,7 @@ def param_spec(
     )
 
 
-def _merge_marker(marker: _Marker, meta: dict[str, Any], cons: dict[str, Any]) -> None:
+def _merge_marker(marker: Marker, meta: dict[str, Any], cons: dict[str, Any]) -> None:
     for key in (
         "ge",
         "gt",

@@ -26,15 +26,32 @@ def serve() -> Iterator[Callable[..., str]]:
         server.stop()
 
 
-def fetch(url: str, method: str = "GET", data: bytes | None = None) -> HttpResponse:
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def fetch(
+    url: str,
+    method: str = "GET",
+    data: bytes | None = None,
+    *,
+    headers: dict[str, str] | None = None,
+    follow_redirects: bool = True,
+) -> HttpResponse:
     """Issue one HTTP/1.1 request with stdlib urllib and capture the response.
 
     Never raises for HTTP error statuses: the status, headers and body are
     captured into the returned `HttpResponse` either way. Raises for transport
-    failures (connection refused, …)."""
-    request = urllib.request.Request(url, data=data, method=method)  # noqa: S310 -- test client for local ephemeral servers
+    failures (connection refused, …). `follow_redirects=False` captures the
+    `30x` itself instead of following `Location`."""
+    request = urllib.request.Request(url, data=data, method=method, headers=headers or {})  # noqa: S310 -- test client for local ephemeral servers
     try:
-        with urllib.request.urlopen(request) as raw:  # noqa: S310 -- test client for local ephemeral servers
+        opener = urllib.request.urlopen if follow_redirects else _NO_REDIRECT_OPENER.open
+        with opener(request) as raw:
             return HttpResponse(raw.status, dict(raw.headers.items()), raw.read())
     except urllib.error.HTTPError as exc:
         return HttpResponse(exc.status, dict(exc.headers.items()), exc.read())
