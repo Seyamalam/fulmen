@@ -11,7 +11,7 @@ import datetime
 import gzip
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from enum import IntEnum, StrEnum
 from pathlib import Path
@@ -504,6 +504,64 @@ def test_served_document_and_docs(serve: Callable[..., str]) -> None:
     assert js.status == 200
     assert js.header("Content-Type") == "text/javascript; charset=utf-8"
     assert b"SwaggerUIBundle" in js.body
+
+
+def test_served_document_structure(serve: Callable[..., str]) -> None:
+    """The served document is a structurally valid OpenAPI 3.1 object.
+
+    The M2 exit criterion asks for a served-document check, not just
+    `app.openapi()`: every path/method declares responses, every `in`
+    is legal, `required` marks only path params, every local `$ref`
+    resolves inside the document, and component schemas are objects.
+    """
+    app = build_rich_app()
+    base = serve(app)
+    res = fetch(f"{base}/openapi.json")
+    assert res.status == 200
+    doc = json.loads(res.body)
+
+    assert doc["openapi"] == "3.1.0"
+    assert {"title", "version"} <= set(doc["info"])
+    components = doc.get("components", {}).get("schemas", {})
+
+    def refs(node: Any) -> Iterator[str]:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "$ref":
+                    yield value
+                else:
+                    yield from refs(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from refs(item)
+
+    for path, item in doc["paths"].items():
+        assert path.startswith("/")
+        for method, op in item.items():
+            assert method in {"get", "post", "put", "patch", "delete", "head", "options"}
+            assert op["responses"], f"{method} {path} has no responses"
+            for status, resp in op["responses"].items():
+                assert status == "default" or status.isdigit()
+                assert "description" in resp or "content" in resp
+            for param in op.get("parameters", []):
+                assert param["in"] in {"path", "query", "header", "cookie"}
+                assert "name" in param
+                assert "schema" in param
+                if param["in"] == "path":
+                    assert param["required"] is True
+            body = op.get("requestBody")
+            if body is not None:
+                assert "content" in body
+    for name, schema in components.items():
+        assert name, f"empty component name {schema}"
+        assert "type" in schema, f"component {name} malformed"
+        if schema.get("type") == "object":
+            required = schema.get("required", [])
+            assert set(required) <= set(schema.get("properties", {}))
+    for ref in refs(doc):
+        assert ref.startswith("#/components/schemas/")
+        name = ref.removeprefix("#/components/schemas/")
+        assert name in components, f"dangling $ref {ref}"
 
 
 def test_disabled_openapi(serve: Callable[..., str]) -> None:

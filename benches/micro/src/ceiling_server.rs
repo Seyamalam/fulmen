@@ -14,6 +14,11 @@
 //! the request, not of parameter extraction, so the literal path the
 //! benchmark requests is the honest bound.
 //!
+//! M2.17 adds `POST /validate` -> `200`, `{"order_id":7}` — the transport
+//! bound for a body-carrying request (accept, read, parse-head, dispatch,
+//! write). It performs no validation: it is the bound both the `validated`
+//! and `reject` scenarios are measured against.
+//!
 //! Usage: `ceiling-server [--host IP] [--port N] [--threads N]` — defaults
 //! `127.0.0.1:8106`, tokio worker threads = CPU cores. `SIGINT`/`SIGTERM`
 //! shut down gracefully.
@@ -51,6 +56,11 @@ fn main() -> io::Result<()> {
             Method::GET,
             "/items/42",
             Response::json(r#"{"item_id":42}"#),
+        )
+        .route(
+            Method::POST,
+            "/validate",
+            Response::json(r#"{"order_id":7}"#),
         );
     let server = if args.reuse_port {
         serve_listener(config, reuse_port_listener(args.bind)?, dispatcher)?

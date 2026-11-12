@@ -604,6 +604,9 @@ class _SchemaGen:
 
     def _record_schema(self, node: dict[str, Any]) -> dict[str, Any]:
         out: dict[str, Any] = {"type": "object"}
+        node_meta = _obj(node.get("meta"))
+        if node_meta.get("description"):
+            out["description"] = node_meta["description"]
         properties: dict[str, Any] = {}
         required: list[str] = []
         rename: str | None = node.get("rename")

@@ -12,6 +12,13 @@ Only the apps Fulmen owns (`run.py:SELF_APPS` — `fulmen`, `fulmen_async`,
 report, not a regression signal for this codebase. p50/p99 are printed
 for information.
 
+M2 additions (M2.17): a `__openapi__` entry under a self app is the
+structural check of the served `/openapi.json` — every boolean must be
+true. A `python_calls` count on the `reject` scenario proves invalid
+bodies never entered Python: fulmen apps must report 0 (Rust answers
+422 without invoking the handler); third-party apps print their count
+for information.
+
 Exit 0 when every gated scenario holds the line, 1 on any regression or
 missing data (a missing app/scenario in the latest run is a failure —
 a scenario that cannot be measured cannot be checked).
@@ -32,7 +39,7 @@ DEFAULT_BASELINE = REPO_ROOT / "benches" / "baseline.json"
 
 # Apps gated by the 5% rule (mirrors run.py; kept local so check.py stays
 # stdlib-only and runnable without importing the harness).
-SELF_APPS = ("fulmen", "fulmen_async", "ceiling")
+SELF_APPS = ("fulmen", "fulmen_async", "fulmen_pydantic", "ceiling")
 
 REGRESSION = 0.05
 
@@ -67,7 +74,15 @@ def main() -> int:
     for app in SELF_APPS:
         if app not in baseline:
             continue
+        checks = latest.get(app, {}).get("__openapi__")
+        if checks is not None:
+            ok = sum(1 for v in checks.values() if v)
+            flag = "" if ok == len(checks) else "  FAIL"
+            failed = failed or bool(flag)
+            print(f"{app:<14}{'openapi':<12}{ok:>12}/{len(checks)} checks{flag}")
         for scenario, base in baseline[app].items():
+            if scenario.startswith("__"):
+                continue
             base_rps = float(base["requests_per_sec"])
             if app not in latest or scenario not in latest[app]:
                 print(f"{app:<14}{scenario:<12}{base_rps:>12.0f}{'missing':>12}{'':>8}  FAIL")
@@ -77,8 +92,15 @@ def main() -> int:
             now_rps = float(now["requests_per_sec"])
             delta = (now_rps - base_rps) / base_rps * 100
             flag = "  FAIL" if delta < -REGRESSION * 100 else ""
+            calls = now.get("python_calls")
+            if scenario == "reject" and calls is not None and calls > 0:
+                flag = "  FAIL"
             failed = failed or bool(flag)
-            print(f"{app:<14}{scenario:<12}{base_rps:>12.0f}{now_rps:>12.0f}{delta:>+7.1f}%{flag}")
+            extra = f"  python_calls={calls}" if calls is not None else ""
+            print(
+                f"{app:<14}{scenario:<12}{base_rps:>12.0f}{now_rps:>12.0f}"
+                f"{delta:>+7.1f}%{flag}{extra}"
+            )
     print()
     if failed:
         print("bench-check FAILED: a tracked scenario regressed more than 5% (requests/sec)")

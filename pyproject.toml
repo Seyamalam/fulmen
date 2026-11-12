@@ -40,6 +40,7 @@ fulmen = "fulmen.cli:main"
 [dependency-groups]
 dev = [
     "maturin>=1.16,<2.0",
+    "pydantic>=2.7",
     "pytest>=8",
     "pytest-cov>=5",
     "ruff>=0.6",

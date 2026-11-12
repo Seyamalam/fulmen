@@ -12,6 +12,7 @@ indices are the spec's `{"factory": id}` / `meta.after` ids.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import dataclasses
 import datetime
@@ -22,7 +23,7 @@ import ipaddress
 import types as pytypes
 import typing
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from decimal import Decimal
 from typing import Annotated, Any, get_args, get_origin, get_type_hints
 
@@ -94,6 +95,32 @@ def _is_deprecated(marker: Any) -> bool:
     return marker is Deprecated or isinstance(marker, Deprecated)
 
 
+def _pydantic_spec(builder: SpecBuilder, hint: Any, where: str) -> dict[str, Any] | None:
+    """Adapter hook (§11.8): a `pydantic.BaseModel` subclass or a mapped
+    pydantic field type → its spec node. Deferred import keeps `pydantic`
+    out of the module graph unless the extra is used."""
+    from fulmen.adapters.pydantic import model_spec_if_pydantic
+
+    return model_spec_if_pydantic(builder, hint, where)
+
+
+def _pydantic_generic(
+    builder: SpecBuilder, origin: Any, args: tuple[Any, ...], where: str
+) -> dict[str, Any] | None:
+    """Adapter hook: `P[T]` with unbound typevars → a `generic` node."""
+    from fulmen.adapters.pydantic import generic_spec_if_pydantic
+
+    return generic_spec_if_pydantic(builder, origin, args, where)
+
+
+def _is_pydantic_model(hint: Any) -> bool:
+    """Duck-typed `BaseModel` check — deferred import, never pulls
+    `pydantic` into the module graph."""
+    from fulmen.adapters.pydantic import is_pydantic_model
+
+    return is_pydantic_model(hint)
+
+
 def _is_transform(marker: Any) -> bool:
     return isinstance(marker, Strip | Lower | Upper) or marker in (Strip, Lower, Upper)
 
@@ -143,6 +170,18 @@ class SpecBuilder:
     def cb_id(self, fn: Callable[..., Any]) -> int:
         self.callbacks.append(fn)
         return len(self.callbacks) - 1
+
+    @contextlib.contextmanager
+    def record_build(self, cls: type[Any]) -> Generator[bool, None, None]:
+        """Guard one record class build against recursion: yields `True`
+        when `cls` is already being built (caller raises), otherwise adds
+        it to the build set for the block's duration."""
+        recursive = cls in self._building
+        self._building = self._building | {cls}
+        try:
+            yield recursive
+        finally:
+            self._building = self._building - {cls}
 
     # ---- the annotation → node core ---------------------------------------
 
@@ -205,6 +244,9 @@ class SpecBuilder:
             return self._enum_spec(hint)
         if getattr(hint, "__fulmen_model__", False):
             return self.record_spec(hint)
+        node = _pydantic_spec(self, hint, where)
+        if node is not None:
+            return node
         if dataclasses.is_dataclass(hint) and isinstance(hint, type):
             return self._dataclass_spec(hint)
         if typing.is_typeddict(hint):
@@ -293,6 +335,9 @@ class SpecBuilder:
                 "origin": self._dataclass_spec(origin),
                 "args": [self.type_spec(a, where) for a in args],
             }
+        node = _pydantic_generic(self, origin, args, where)
+        if node is not None:
+            return node
         raise AnnotationError(f"unsupported {where} {_type_name(hint)}")
 
     def _enum_spec(self, cls: enum.EnumMeta) -> dict[str, Any]:
@@ -779,7 +824,11 @@ def param_spec(
         source = (
             "path"
             if source_marker is None and name in path_names
-            else (source_marker.source if source_marker is not None else _default_source(node))
+            else (
+                source_marker.source
+                if source_marker is not None
+                else ("body" if _is_pydantic_model(base) else _default_source(node))
+            )
         )
     if node_markers:
         builder.apply_markers(node, node_markers, where)
