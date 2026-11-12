@@ -212,10 +212,10 @@ injection with scopes, adapter interfaces, native plugin SDK (unstable ABI),
 
 ### Pipeline (`fulmen-core`)
 
-- [ ] M3.1 Phases from DESIGN.md §8, each with native and Python hook lists
-- [ ] M3.2 Short-circuit semantics per phase; `on_error` routing by exception MRO
-- [ ] M3.3 Group-scoped hooks; deterministic ordering; security phase priorities
-- [ ] M3.4 `fulmen routes --hooks` and `--cost` (Python crossings per route)
+- [x] M3.1 Phases from DESIGN.md §8, each with native and Python hook lists — `Phase`/`HookDecl`/`RouteHooks` in `fulmen-core::pipeline`; `HookEntry::{Native, Python}` + `NativeApp.add_hook`/`add_native_hook` in `fulmen-py`
+- [x] M3.2 Short-circuit semantics per phase; `on_error` routing by exception MRO — `None` continues, `dict` merges `request.state`, a value short-circuits/replaces; hook errors route the route's merged `ErrorTable`
+- [x] M3.3 Group-scoped hooks; deterministic ordering; security phase priorities — `(priority, seq)` ordering, `PRIORITY_SECURITY`/`PRIORITY_SYSTEM`/`PRIORITY_USER` bands, `Fulmen(prefix=…)` + `app.mount()` scope layers
+- [x] M3.4 `fulmen routes --hooks` and `--cost` (Python crossings per route) — built from `NativeApp.describe_routes()` declarations
 
 ### Plugins
 
@@ -223,7 +223,7 @@ injection with scopes, adapter interfaces, native plugin SDK (unstable ABI),
 - [ ] M3.6 `requires`/`conflicts`, topological ordering, startup errors for missing/conflicting plugins
 - [ ] M3.7 Plugin configuration through `Settings` sections
 - [ ] M3.8 Plugins can add routes, providers, OpenAPI components, CLI commands, `check` rules
-- [ ] M3.9 Hook registration closed after startup (runtime guardrail, DESIGN.md §14.8)
+- [x] M3.9 Hook registration closed after startup (runtime guardrail, DESIGN.md §14.8) — `Fulmen` seals every declaration at compile; late registration raises `RuntimeError`
 
 ### Dependency injection
 

@@ -82,7 +82,7 @@ Examples: `-> int` → `[(200, int-node)]`; `-> None` → `[(204, None)]`;
 
 `NativeApp.add_route` takes
 `(method, path, param_types, call_args, handler, is_async, none_ok,
-response_descs)`:
+response_descs, layers)`:
 
 - `param_types`: `[(name, "int"|"str")]` — the router's match-time path
   types (`{name}` / `{*name}` catch-all).
@@ -93,6 +93,12 @@ response_descs)`:
   `object` is the literal value or factory callable.
 - `none_ok`: whether the handler may return `None`.
 - `response_descs`: `[(status | None, Descriptor | None)]` per §4.
+- `layers`: `[int]` — the group-scope ids this route descends through
+  (mounted `Fulmen(prefix=…)` apps, outermost first; `[]` for direct
+  routes). `NativeApp.add_scope()` allocates ids; hook and `on_error`
+  registrations carry a scope — `0` is the app itself — so a route's
+  resolved hook chains and error table come from the app scope plus its
+  `layers` (DESIGN.md §8, §5.5).
 
 ## 6. `meta` and callbacks
 
