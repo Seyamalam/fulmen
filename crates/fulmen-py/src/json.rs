@@ -1,12 +1,21 @@
 //! JSON support for handler return values (DESIGN.md §10.2).
 //!
-//! `dict`/`list`/`tuple` results are extracted into a [`JsonValue`] tree
-//! while the GIL is held, then serialized to bytes without it. Extraction
-//! supports nested `dict`/`list`/`tuple`, `str`, `int`, `float`, `bool` and
-//! `None` (M1 subset); anything else is an unsupported return type.
+//! `dict`/`list`/`tuple`/`Model`/dataclass results are extracted into a
+//! [`JsonValue`] tree while the GIL is held, then serialized to bytes
+//! without it. Extraction supports nested `dict`/`list`/`tuple`/`set`,
+//! `str`, `int`, `float`, `bool`, `None`, `bytes` (base64), `Decimal`
+//! (string), `datetime`/`date`/`time`/`timedelta` (ISO 8601), `UUID`,
+//! `IPv4`/`IPv6` addresses, `Email`/`Url`, and `Enum` members (their
+//! declared value).
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyList, PyString, PyTuple};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{
+    PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFrozenSet, PyList, PySet,
+    PyString, PyTime, PyTuple,
+};
+
+use crate::descriptor::{self, cached};
 
 /// Maximum nesting depth accepted when extracting a result tree. Matches the
 /// JSON depth request limit (DESIGN.md §14.3); it also stops extraction on
@@ -104,6 +113,24 @@ fn extract_at(obj: &Bound<'_, PyAny>, depth: usize) -> Result<JsonValue, Extract
     if let Ok(s) = obj.cast::<PyString>() {
         return Ok(JsonValue::Str(s.to_str()?.to_owned()));
     }
+    if let Ok(b) = obj.cast::<PyBytes>() {
+        return Ok(JsonValue::Str(base64_encode(b.as_bytes())));
+    }
+    if let Ok(b) = obj.cast::<PyByteArray>() {
+        return Ok(JsonValue::Str(base64_encode(&b.to_vec())));
+    }
+    // `datetime` is a `date` subclass — check it first.
+    if obj.is_instance_of::<PyDateTime>()
+        || obj.is_instance_of::<PyDate>()
+        || obj.is_instance_of::<PyTime>()
+    {
+        return Ok(JsonValue::Str(
+            obj.call_method0("isoformat")?.extract::<String>()?,
+        ));
+    }
+    if obj.is_instance_of::<PyDelta>() {
+        return Ok(JsonValue::Str(descriptor::delta_text(obj)?));
+    }
     if let Ok(d) = obj.cast::<PyDict>() {
         let mut pairs = Vec::with_capacity(d.len());
         for (key, value) in d.iter() {
@@ -134,7 +161,87 @@ fn extract_at(obj: &Bound<'_, PyAny>, depth: usize) -> Result<JsonValue, Extract
         }
         return Ok(JsonValue::List(items));
     }
+    if let Ok(set) = obj.cast::<PySet>() {
+        let mut items = Vec::with_capacity(set.len());
+        for item in set.iter() {
+            items.push(extract_at(&item, depth + 1)?);
+        }
+        return Ok(JsonValue::List(items));
+    }
+    if let Ok(set) = obj.cast::<PyFrozenSet>() {
+        let mut items = Vec::with_capacity(set.len());
+        for item in set.iter() {
+            items.push(extract_at(&item, depth + 1)?);
+        }
+        return Ok(JsonValue::List(items));
+    }
+    let py = obj.py();
+    // Rich scalars serialize through their canonical text form.
+    for (cell, module, name) in [
+        (&DECIMAL, "decimal", "Decimal"),
+        (&UUID_CLS, "uuid", "UUID"),
+        (&IPV4, "ipaddress", "IPv4Address"),
+        (&IPV6, "ipaddress", "IPv6Address"),
+    ] {
+        if obj.is_instance(&cached(py, cell, module, name)?.bind(py))? {
+            return Ok(JsonValue::Str(obj.str()?.to_str()?.to_owned()));
+        }
+    }
+    if obj.is_instance(&cached(py, &ENUM_CLS, "enum", "Enum")?.bind(py))? {
+        return extract_at(&obj.getattr("value")?, depth + 1);
+    }
+    // `Model` and dataclass instances expose their declared state.
+    let ty = obj.get_type();
+    if ty.hasattr("__fulmen_model__")? {
+        if let Ok(state) = obj.getattr("__dict__") {
+            return extract_at(&state, depth + 1);
+        }
+    }
+    if ty.hasattr("__dataclass_fields__")? {
+        if let Ok(state) = obj.getattr("__dict__") {
+            return extract_at(&state, depth + 1);
+        }
+        // Slotted dataclass — read each declared field.
+        let fields = ty.getattr("__dataclass_fields__")?;
+        let mut pairs = Vec::new();
+        for item in fields.call_method0("keys")?.try_iter()? {
+            let name = item?.extract::<String>()?;
+            pairs.push((name.clone(), extract_at(&obj.getattr(&name)?, depth + 1)?));
+        }
+        return Ok(JsonValue::Dict(pairs));
+    }
     Err(ExtractError::Unsupported(type_name(obj)))
+}
+
+static DECIMAL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static UUID_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static IPV4: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static IPV6: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static ENUM_CLS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// RFC 4648 base64, standard alphabet, with padding — no dependency.
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = u32::from(*chunk.get(1).unwrap_or(&0));
+        let b2 = u32::from(*chunk.get(2).unwrap_or(&0));
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Serialize a [`JsonValue`] tree to UTF-8 JSON bytes. Never fails: every

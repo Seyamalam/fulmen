@@ -11,7 +11,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::aloop::{self, AsyncLoop};
-use crate::dispatch::{AppInner, HandlerEntry, HandlerKind, PyDispatcher};
+use crate::convert::ErrorTable;
+use crate::descriptor::Descriptor;
+use crate::dispatch::{
+    AppInner, CallSource, CallSpecArg, HandlerEntry, PyDispatcher, ResponseDesc,
+};
 use crate::pool::SyncPool;
 
 pyo3::create_exception!(
@@ -21,21 +25,31 @@ pyo3::create_exception!(
     "The application failed to start; lists every declaration or binding problem found."
 );
 
-/// The Python shape of a route spec tuple (`NativeApp.add_route` argument).
+/// The Python shape of a route spec tuple (`NativeApp.add_route` argument):
+/// `(method, path, param_types, call_args, handler, is_async, none_ok,
+/// response_descs)` — see `python/fulmen/app.py::_inspect_handler` and
+/// docs/SPEC-FORMAT.md.
 type RouteSpec = (
+    // Uppercase HTTP method.
     String,
+    // The route pattern.
     String,
+    // `(name, "int"|"str")` path params, handler-signature order (router).
     Vec<(String, String)>,
-    Vec<bool>,
+    // `(name, source, kind, Descriptor|None)` for every parameter,
+    // signature order.
+    Vec<(String, String, String, Option<Py<Descriptor>>)>,
+    // The callable.
     Py<PyAny>,
+    // `inspect.iscoroutinefunction(handler)`.
     bool,
+    // `None` return is legal (`-> None`/`-> NoContent` declared).
+    bool,
+    // `(status|None, Descriptor|None)` declared response set (OpenAPI).
+    Vec<(Option<u16>, Option<Py<Descriptor>>)>,
 );
 
-/// One route registration passed from Python: `method`, `path`, the ordered
-/// `(name, type_name)` path-param specs, a `kw_flags` tuple matching the
-/// handler's parameter order (`True` = keyword-only), the `handler`, and
-/// `is_async`.
-#[derive(Debug)]
+/// One route registration passed from Python.
 struct RouteRegistration {
     /// Uppercase HTTP method name.
     method: String,
@@ -43,38 +57,56 @@ struct RouteRegistration {
     path: String,
     /// `(name, type-name)` in the route's declaration order.
     param_types: Vec<(String, String)>,
-    /// Per-handler-parameter keyword-only flags, signature order.
-    kw_flags: Vec<bool>,
+    /// `(name, source, kind, descriptor)` for every handler parameter.
+    call_args: Vec<(String, String, String, Option<Py<Descriptor>>)>,
     /// The callable.
     handler: Py<PyAny>,
     /// `inspect.iscoroutinefunction(handler)`.
     is_async: bool,
+    /// Whether a `None` return answers `204`.
+    none_ok: bool,
+    /// The declared response variants.
+    response_descs: Vec<(Option<u16>, Option<Py<Descriptor>>)>,
 }
 
 impl RouteRegistration {
     /// Extract one registration from the Python side of `NativeApp.add_route`.
     fn extract(bound: &Bound<'_, PyTuple>) -> PyResult<Self> {
-        let (method, path, param_types, kw_flags, handler, is_async): RouteSpec =
+        let (method, path, param_types, call_args, handler, is_async, none_ok, response_descs): RouteSpec =
             bound.extract()?;
         Ok(Self {
             method,
             path,
             param_types,
-            kw_flags,
+            call_args,
             handler,
             is_async,
+            none_ok,
+            response_descs,
         })
     }
 }
 
-/// The native half of a `Fulmen` application: route declarations recorded
-/// until [`Fulmen.run`](python/fulmen/app.py) compiles them.
+/// One `@app.on_error` registration recorded by Python.
+struct ErrorRegistration {
+    /// The exception class.
+    class_: Py<PyAny>,
+    /// The handler callable.
+    handler: Py<PyAny>,
+    /// `inspect.iscoroutinefunction(handler)`.
+    is_async: bool,
+}
+
+/// The native half of a `Fulmen` application: route and error-handler
+/// declarations recorded until [`Fulmen.run`](python/fulmen/app.py) compiles
+/// them.
 ///
 /// Instances are not exposed to user code directly — the Python wrapper
 /// keeps one as `app._native` and hands it to `serve`/`serve_for_test`.
 #[pyclass(name = "NativeApp", module = "fulmen._fulmen")]
 pub(crate) struct NativeApp {
     routes: Vec<RouteRegistration>,
+    error_handlers: Vec<ErrorRegistration>,
 }
 
 #[pymethods]
@@ -82,11 +114,14 @@ impl NativeApp {
     /// A new, empty declaration set.
     #[new]
     fn new() -> Self {
-        Self { routes: Vec::new() }
+        Self {
+            routes: Vec::new(),
+            error_handlers: Vec::new(),
+        }
     }
 
-    /// Record one route. `spec` is the six-tuple described on
-    /// [`RouteRegistration`]; the Python layer builds it from the handler's
+    /// Record one route. `spec` is the eight-tuple described on
+    /// [`RouteSpec`]; the Python layer builds it from the handler's
     /// signature and type hints.
     ///
     /// # Errors
@@ -95,6 +130,15 @@ impl NativeApp {
         let registration = RouteRegistration::extract(spec)?;
         self.routes.push(registration);
         Ok(())
+    }
+
+    /// Record one `@app.on_error(exc_cls)` registration.
+    fn add_error_handler(&mut self, exc_class: Py<PyAny>, handler: Py<PyAny>, is_async: bool) {
+        self.error_handlers.push(ErrorRegistration {
+            class_: exc_class,
+            handler,
+            is_async,
+        });
     }
 }
 
@@ -127,10 +171,10 @@ impl Default for BridgeConfig {
 
 /// Compile `native`'s recorded declarations into [`CompiledServe`].
 ///
-/// Python-side declaration problems (a handler parameter that is not a path
-/// parameter, a param spec count mismatch, a missing route param type, …)
-/// are merged with [`fulmen_core::CompileErrors`] into one [`StartupError`]
-/// listing everything found (DESIGN.md §14.1).
+/// Python-side declaration problems (a bad source name, a param spec count
+/// mismatch, a missing route param type, …) are merged with
+/// [`fulmen_core::CompileErrors`] into one [`StartupError`] listing
+/// everything found (DESIGN.md §14.1).
 ///
 /// # Errors
 /// [`StartupError`] listing every problem found.
@@ -145,17 +189,17 @@ pub(crate) fn compile_app(
     let mut decls = AppDecl::new();
     let mut entries: Vec<HandlerEntry> = Vec::with_capacity(native.routes.len());
     let mut problems: Vec<String> = Vec::new();
-    let mut has_async = false;
+    let mut has_async = native.error_handlers.iter().any(|e| e.is_async);
 
     for registration in &native.routes {
         let label = format!("{} {}", registration.method, registration.path);
         let Some(method) = parse_method(&registration.method, &label, &mut problems) else {
             continue;
         };
-        let Some(kind) = check_params(py, registration, &label, &mut problems) else {
+        let Some(call_spec) = check_spec(py, registration, &label, &mut problems) else {
             continue;
         };
-        has_async |= matches!(kind, HandlerKind::Async { .. });
+        has_async |= registration.is_async;
 
         let mut decl = RouteDecl::new(method, &registration.path, index_to_u32(entries.len()));
         for (name, ty) in &registration.param_types {
@@ -164,7 +208,17 @@ pub(crate) fn compile_app(
         decls.route(decl);
         entries.push(HandlerEntry {
             callable: Arc::new(registration.handler.clone_ref(py)),
-            kind,
+            is_async: registration.is_async,
+            none_ok: registration.none_ok,
+            call_spec: call_spec.into_boxed_slice(),
+            response_descs: registration
+                .response_descs
+                .iter()
+                .map(|(status, desc)| ResponseDesc {
+                    status: *status,
+                    desc: desc.as_ref().map(|d| Arc::new(d.clone_ref(py))),
+                })
+                .collect(),
         });
     }
 
@@ -176,6 +230,18 @@ pub(crate) fn compile_app(
     if !problems.is_empty() {
         return Err(StartupError::new_err(format_startup_errors(&problems)));
     }
+
+    let errors = Arc::new(ErrorTable {
+        handlers: native
+            .error_handlers
+            .iter()
+            .map(|e| crate::convert::ErrorHandler {
+                class_: Arc::new(e.class_.clone_ref(py)),
+                handler: Arc::new(e.handler.clone_ref(py)),
+                is_async: e.is_async,
+            })
+            .collect(),
+    });
 
     // §7.3: pool size defaults to 4× cores under the GIL, 2× free-threaded;
     // the queue is bounded at 1024 with a 5 s queue deadline (§14.4).
@@ -191,11 +257,12 @@ pub(crate) fn compile_app(
         batch_size,
         logger.clone(),
         response_cls.clone(),
+        Arc::clone(&errors),
     )
     .map_err(|err| StartupError::new_err(format!("failed to spawn the sync pool: {err}")))?;
 
     // §7.4: the asyncio loop thread only exists when the app declares
-    // `async def` handlers.
+    // `async def` handlers or async `on_error` handlers.
     let async_loop = if has_async {
         let loop_impl = aloop::resolve_loop_impl(py, config.uvloop)?;
         Some(AsyncLoop::start(
@@ -205,6 +272,7 @@ pub(crate) fn compile_app(
             Duration::from_secs(5),
             logger.clone(),
             response_cls.clone(),
+            Arc::clone(&errors),
         )?)
     } else {
         None
@@ -258,14 +326,14 @@ const SUPPORTED_METHODS: [Method; 7] = [
     Method::OPTIONS,
 ];
 
-/// Validate the handler's declared parameters against its route's path
-/// params and pick the [`HandlerKind`]; problems go to `problems`.
-fn check_params(
+/// Turn the registration's `call_args` into the call spec, validating
+/// source names and path-param consistency; problems go to `problems`.
+fn check_spec(
     py: Python<'_>,
     registration: &RouteRegistration,
     label: &str,
     problems: &mut Vec<String>,
-) -> Option<HandlerKind> {
+) -> Option<Vec<CallSpecArg>> {
     let handler_name = registration
         .handler
         .bind(py)
@@ -273,26 +341,59 @@ fn check_params(
         .and_then(|q| q.extract::<String>())
         .unwrap_or_else(|_| "<handler>".to_owned());
 
-    // Every handler parameter must be a path parameter (M1: no query/body
-    // extraction). The route's declared param order defines the call order,
-    // so kw_flags only decide positional-vs-keyword per handler signature.
-    if registration.kw_flags.len() != registration.param_types.len() {
+    let mut spec = Vec::with_capacity(registration.call_args.len());
+    let mut path_seen = 0usize;
+    for (name, source, kind, desc) in &registration.call_args {
+        let source = match CallSource::parse(source) {
+            Some(s) => s,
+            None => {
+                problems.push(format!(
+                    "{label} ({handler_name}): parameter `{name}` has unknown source `{source}`"
+                ));
+                return None;
+            }
+        };
+        let positional = match kind.as_str() {
+            "pos_only" => true,
+            "normal" | "kw_only" => false,
+            other => {
+                problems.push(format!(
+                    "{label} ({handler_name}): parameter `{name}` has unknown kind `{other}`"
+                ));
+                return None;
+            }
+        };
+        if source == CallSource::Path {
+            if !registration.param_types.iter().any(|(n, _)| n == name) {
+                problems.push(format!(
+                    "{label} ({handler_name}): `{name}` is marked path but is not a route parameter"
+                ));
+                return None;
+            }
+            path_seen += 1;
+        }
+        if positional && source != CallSource::Path {
+            problems.push(format!(
+                "{label} ({handler_name}): positional-only parameter `{name}` must be a path parameter"
+            ));
+            return None;
+        }
+        spec.push(CallSpecArg {
+            name: name.clone().into_boxed_str(),
+            source,
+            positional,
+            desc: desc.as_ref().map(|d| Arc::new(d.clone_ref(py))),
+        });
+    }
+    if path_seen != registration.param_types.len() {
         problems.push(format!(
-            "{label} ({handler_name}): handler has {} parameter(s) but the route declares {} path parameter(s)",
-            registration.kw_flags.len(),
+            "{label} ({handler_name}): the route declares {} path parameter(s) but {} are marked path-sourced",
             registration.param_types.len(),
+            path_seen,
         ));
         return None;
     }
-    if registration.is_async {
-        Some(HandlerKind::Async {
-            kw_flags: registration.kw_flags.clone().into_boxed_slice(),
-        })
-    } else {
-        Some(HandlerKind::Sync {
-            kw_flags: registration.kw_flags.clone().into_boxed_slice(),
-        })
-    }
+    Some(spec)
 }
 
 /// `usize` route index to `u32` without a panic path (the table is tiny).
