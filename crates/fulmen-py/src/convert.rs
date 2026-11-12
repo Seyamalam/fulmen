@@ -15,12 +15,13 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fulmen_schema::errors::Source;
+use fulmen_schema::errors::ValidationErrors;
+use fulmen_schema::value::{LiteralValue, Value};
 use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use http::{HeaderMap, StatusCode};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyInt, PyString, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
 
 use crate::descriptor::{self, Descriptor};
 use crate::json::{self, JsonValue};
@@ -59,26 +60,24 @@ pub(crate) enum ArgKind {
 /// A typed call-argument value in a form cheap to materialize as Python.
 #[derive(Debug)]
 pub(crate) enum ParamValue {
-    /// `int` parameter.
-    Int(i64),
-    /// `str` parameter.
-    Str(String),
-    /// A ready Python object — the exception an `on_error` handler receives.
+    /// A ready Python object — a literal default, or the exception an
+    /// `on_error` handler receives.
     Obj(Arc<Py<PyAny>>),
-    /// Validate `raw` through `desc` at call time (`source`, lax mode) —
-    /// applies `AfterValidator` hooks and rich-type materialization to
-    /// extracted parameters.
-    Deferred {
+    /// A zero-arg factory called at call time (a `default_factory`
+    /// default, which must produce a fresh value per request).
+    CallDefault(Arc<Py<PyAny>>),
+    /// A decoded wire value for a parameter with no descriptor — the raw
+    /// `Value` materializes at call time without validation.
+    Wire(Value<'static>),
+    /// `value` passed `desc`'s validator at dispatch (lax for text
+    /// sources, strict for the body): materialization alone needs the
+    /// GIL, so extraction-time `422`s never enter Python.
+    Validated {
         /// The parameter's compiled descriptor.
         desc: Arc<Py<Descriptor>>,
-        /// The wire source, for validator source-tagging.
-        source: Source,
-        /// The extracted wire value.
-        raw: Box<ParamValue>,
+        /// The already-validated value.
+        value: Value<'static>,
     },
-    /// No value — the callable's own default (or a marker default the
-    /// Python wrapper injects) applies.
-    Omitted,
 }
 
 /// The handler's return value converted to owned Rust data.
@@ -306,18 +305,21 @@ fn route_error(
     ctx: &PyCtx<'_>,
     what: &str,
 ) -> CallOutcome {
-    if let Some(ret) = problem_from_err(py, &err) {
-        return CallOutcome::Return(ret);
-    }
+    // A registered `@app.on_error` handler wins even for HTTPError /
+    // ValidationError — that is how apps override the built-in problem
+    // rendering for specific statuses (§17).
     if ctx.route_errors
         && let Some(h) = ctx.errors.lookup(py, &err)
     {
         return CallOutcome::Deferred(DeferredCall {
             callable: Arc::clone(&h.handler),
-            arg: Arc::new(err.value(py).unbind().into_any()),
+            arg: Arc::new(err.value(py).clone().unbind().into_any()),
             is_async: h.is_async,
             label: ctx.label.into(),
         });
+    }
+    if let Some(ret) = problem_from_err(py, &err) {
+        return CallOutcome::Return(ret);
     }
     log_exception(
         py,
@@ -334,7 +336,9 @@ fn route_error(
 fn problem_from_err(py: Python<'_>, err: &PyErr) -> Option<PyReturn> {
     let http_cls = descriptor::http_error_class(py).ok()?;
     let val_cls = descriptor::validation_error_class(py).ok()?;
-    if !err.matches(py, http_cls.bind(py)) && !err.matches(py, val_cls.bind(py)) {
+    if !err.matches(py, http_cls.bind(py)).is_ok_and(|m| m)
+        && !err.matches(py, val_cls.bind(py)).is_ok_and(|m| m)
+    {
         return None;
     }
     let fun = py
@@ -375,9 +379,6 @@ pub(crate) fn build_args<'py>(
     let mut positional = Vec::new();
     let kwargs = PyDict::new(py);
     for arg in args {
-        if matches!(arg.value, ParamValue::Omitted) {
-            continue;
-        }
         let value = resolve_value(py, &arg.value)?;
         match arg.kind {
             ArgKind::Positional => positional.push(value),
@@ -390,34 +391,26 @@ pub(crate) fn build_args<'py>(
     Ok((tuple, kwargs))
 }
 
-/// A `ParamValue` → the Python object passed to the callable. `Deferred`
-/// values run their descriptor's validator now (lax mode — extracted
-/// values are wire text); anything else is already shaped.
+/// A `ParamValue` → the Python object passed to the callable.
+/// `Validated` values only materialize (validation ran at dispatch);
+/// `CallDefault` invokes the parameter's default factory.
 fn resolve_value<'py>(
     py: Python<'py>,
     value: &ParamValue,
 ) -> Result<Bound<'py, PyAny>, InvokeError> {
     match value {
-        ParamValue::Int(i) => Ok(PyInt::new(py, *i).into_any()),
-        ParamValue::Str(s) => Ok(PyString::new(py, s).into_any()),
         ParamValue::Obj(o) => Ok(o.bind(py).clone()),
-        ParamValue::Omitted => unreachable_omitted(),
-        ParamValue::Deferred { desc, source, raw } => {
-            let raw_obj = resolve_value(py, raw)?;
-            desc.bind(py)
-                .borrow()
-                .do_validate(py, &raw_obj, *source, true)
-                .map(|v| v.into_bound(py))
-                .map_err(InvokeError::Internal)
-        }
+        ParamValue::CallDefault(factory) => factory.bind(py).call0().map_err(InvokeError::Internal),
+        ParamValue::Wire(v) => descriptor::value_to_py(py, v)
+            .map(|o| o.into_bound(py))
+            .map_err(InvokeError::Internal),
+        ParamValue::Validated { desc, value } => desc
+            .bind(py)
+            .borrow()
+            .do_materialize(py, value)
+            .map(|o| o.into_bound(py))
+            .map_err(InvokeError::Internal),
     }
-}
-
-/// `Omitted` args are skipped in `build_args` before resolution.
-fn unreachable_omitted<'py>() -> Result<Bound<'py, PyAny>, InvokeError> {
-    Err(InvokeError::Internal(PyTypeError::new_err(
-        "Omitted argument reached resolve_value — internal error",
-    )))
 }
 
 /// Build the argument tuple/kwargs and call the handler.
@@ -530,9 +523,9 @@ fn convert_response(
 }
 
 /// Join a sync `Iterable[bytes|str]` body into one octet buffer.
-fn buffer_iter(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Result<PyReturn, PyErr> {
+fn buffer_iter(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> Result<PyReturn, PyErr> {
     let mut out = Vec::new();
-    for item in obj.iter()? {
+    for item in obj.try_iter()? {
         let item = item?;
         if let Ok(b) = item.cast::<PyBytes>() {
             out.extend_from_slice(b.as_bytes());
@@ -626,21 +619,111 @@ fn typed(status: StatusCode, content_type: &'static str, body: Bytes) -> fulmen_
     }
 }
 
+/// The problem-document `type` for request-validation failures (§11.7).
+pub(crate) const VALIDATION_PROBLEM_TYPE: &str = "https://fulmen.dev/problems/validation";
+
+/// An RFC 9457 `application/problem+json` response for the bridge's own
+/// error paths — the same shape `fulmen.errors.problem_for` produces for
+/// raised `HTTPError`s (§17: native and Python errors share the format).
+pub(crate) fn problem_response(
+    status: StatusCode,
+    type_uri: &str,
+    title: &str,
+    detail: Option<String>,
+    errors: Option<&ValidationErrors>,
+) -> fulmen_server::Response {
+    let mut pairs = vec![
+        ("type".to_owned(), JsonValue::Str(type_uri.to_owned())),
+        ("title".to_owned(), JsonValue::Str(title.to_owned())),
+        (
+            "status".to_owned(),
+            JsonValue::Int(i64::from(status.as_u16())),
+        ),
+    ];
+    if let Some(detail) = detail {
+        pairs.push(("detail".to_owned(), JsonValue::Str(detail)));
+    }
+    if let Some(errors) = errors {
+        pairs.push(("errors".to_owned(), errors_json(errors)));
+    }
+    let mut response = fulmen_server::Response::status(status);
+    response
+        .headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static(CT_PROBLEM));
+    response.body = Bytes::from(json::write(&JsonValue::Dict(pairs)));
+    response
+}
+
+/// The §11.7 `errors` array as a [`JsonValue`] — the same encoding
+/// [`ValidationErrors::to_json`] produces, built from the typed entries.
+fn errors_json(errors: &ValidationErrors) -> JsonValue {
+    JsonValue::List(
+        errors
+            .to_problem_entries()
+            .iter()
+            .map(|e| {
+                let mut entry = vec![
+                    ("loc".to_owned(), JsonValue::Str(e.loc_pointer.clone())),
+                    ("code".to_owned(), JsonValue::Str(e.code.to_owned())),
+                    ("message".to_owned(), JsonValue::Str(e.message.to_owned())),
+                ];
+                if let Some(limit) = e.limit {
+                    entry.push(("limit".to_owned(), literal_json(limit)));
+                }
+                JsonValue::Dict(entry)
+            })
+            .collect(),
+    )
+}
+
+/// A `LiteralValue` bound (`ge`/`le`/…) as a [`JsonValue`], matching
+/// [`LiteralValue::to_json`]'s rendering.
+fn literal_json(value: &LiteralValue) -> JsonValue {
+    match value {
+        LiteralValue::Bool(b) => JsonValue::Bool(*b),
+        LiteralValue::Int(i) => JsonValue::Int(*i),
+        LiteralValue::UInt(u) => JsonValue::UInt(*u),
+        LiteralValue::BigInt(t) => JsonValue::BigInt(t.clone()),
+        LiteralValue::Float(f) if f.is_finite() => JsonValue::Float(*f),
+        // JSON has no NaN/Infinity literal — `to_json` renders `null`.
+        LiteralValue::Null | LiteralValue::Float(_) => JsonValue::Null,
+        LiteralValue::Str(s) => JsonValue::Str(s.to_string()),
+        LiteralValue::Bytes(b) => JsonValue::Str(b.escape_ascii().to_string()),
+    }
+}
+
+/// A `422` for the extracted-parameter error set (§11.7).
+pub(crate) fn validation_problem(errors: &ValidationErrors) -> fulmen_server::Response {
+    problem_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        VALIDATION_PROBLEM_TYPE,
+        "Request validation failed",
+        None,
+        Some(errors),
+    )
+}
+
 /// A minimal `500` used wherever the dispatcher must answer an error.
 pub(crate) fn internal_error() -> fulmen_server::Response {
-    typed(
+    problem_response(
         StatusCode::INTERNAL_SERVER_ERROR,
-        CT_TEXT,
-        Bytes::from_static(b"Internal Server Error"),
+        "about:blank",
+        "Internal Server Error",
+        None,
+        None,
     )
 }
 
 /// `503` + `Retry-After` for shed load (DESIGN.md §14.4): queue full, or a
 /// job that waited past its queue deadline.
 pub(crate) fn service_unavailable() -> fulmen_server::Response {
-    let mut response = internal_error();
-    response.status = StatusCode::SERVICE_UNAVAILABLE;
-    response.body = Bytes::from_static(b"Service Unavailable");
+    let mut response = problem_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "about:blank",
+        "Service Unavailable",
+        None,
+        None,
+    );
     response
         .headers
         .insert(http::header::RETRY_AFTER, HeaderValue::from_static("1"));

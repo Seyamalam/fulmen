@@ -78,6 +78,10 @@ pub(crate) fn extract(obj: &Bound<'_, PyAny>) -> Result<JsonValue, ExtractError>
     extract_at(obj, 0)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one branch per Python type — the extraction table mirrors `JsonValue` 1:1"
+)]
 fn extract_at(obj: &Bound<'_, PyAny>, depth: usize) -> Result<JsonValue, ExtractError> {
     if depth > MAX_DEPTH {
         return Err(ExtractError::Unsupported(format!(
@@ -183,19 +187,19 @@ fn extract_at(obj: &Bound<'_, PyAny>, depth: usize) -> Result<JsonValue, Extract
         (&IPV4, "ipaddress", "IPv4Address"),
         (&IPV6, "ipaddress", "IPv6Address"),
     ] {
-        if obj.is_instance(&cached(py, cell, module, name)?.bind(py))? {
+        if obj.is_instance(cached(py, cell, module, name)?.bind(py))? {
             return Ok(JsonValue::Str(obj.str()?.to_str()?.to_owned()));
         }
     }
-    if obj.is_instance(&cached(py, &ENUM_CLS, "enum", "Enum")?.bind(py))? {
+    if obj.is_instance(cached(py, &ENUM_CLS, "enum", "Enum")?.bind(py))? {
         return extract_at(&obj.getattr("value")?, depth + 1);
     }
     // `Model` and dataclass instances expose their declared state.
     let ty = obj.get_type();
-    if ty.hasattr("__fulmen_model__")? {
-        if let Ok(state) = obj.getattr("__dict__") {
-            return extract_at(&state, depth + 1);
-        }
+    if ty.hasattr("__fulmen_model__")?
+        && let Ok(state) = obj.getattr("__dict__")
+    {
+        return extract_at(&state, depth + 1);
     }
     if ty.hasattr("__dataclass_fields__")? {
         if let Ok(state) = obj.getattr("__dict__") {

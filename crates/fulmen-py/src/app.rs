@@ -14,7 +14,8 @@ use crate::aloop::{self, AsyncLoop};
 use crate::convert::ErrorTable;
 use crate::descriptor::Descriptor;
 use crate::dispatch::{
-    AppInner, CallSource, CallSpecArg, HandlerEntry, PyDispatcher, ResponseDesc,
+    AppInner, CallSource, CallSpecArg, HandlerEntry, MissingArg, ParamSchema, PyDispatcher,
+    ResponseDesc,
 };
 use crate::pool::SyncPool;
 
@@ -36,9 +37,10 @@ type RouteSpec = (
     String,
     // `(name, "int"|"str")` path params, handler-signature order (router).
     Vec<(String, String)>,
-    // `(name, source, kind, Descriptor|None)` for every parameter,
-    // signature order.
-    Vec<(String, String, String, Option<Py<Descriptor>>)>,
+    // `(name, source, kind, wire_name, Descriptor|None, missing)` for
+    // every parameter, signature order; `missing` is
+    // `("required"|"omit"|"literal"|"factory", object)`.
+    Vec<CallArgSpec>,
     // The callable.
     Py<PyAny>,
     // `inspect.iscoroutinefunction(handler)`.
@@ -49,6 +51,21 @@ type RouteSpec = (
     Vec<(Option<u16>, Option<Py<Descriptor>>)>,
 );
 
+/// One `call_args` element of a route spec: the parameter name, its
+/// `CallSource` name, `pos_only`/`normal`/`kw_only`, the wire name the
+/// value is looked up by (alias or `x-api-key` header form), the compiled
+/// descriptor, and `("required"|"omit"|"literal"|"factory", object)` —
+/// what an absent source value means (`literal` passes the object,
+/// `factory` calls it, `omit` lets the signature default apply).
+type CallArgSpec = (
+    String,
+    String,
+    String,
+    String,
+    Option<Py<Descriptor>>,
+    (String, Py<PyAny>),
+);
+
 /// One route registration passed from Python.
 struct RouteRegistration {
     /// Uppercase HTTP method name.
@@ -57,8 +74,8 @@ struct RouteRegistration {
     path: String,
     /// `(name, type-name)` in the route's declaration order.
     param_types: Vec<(String, String)>,
-    /// `(name, source, kind, descriptor)` for every handler parameter.
-    call_args: Vec<(String, String, String, Option<Py<Descriptor>>)>,
+    /// The parameters' call spec, signature order.
+    call_args: Vec<CallArgSpec>,
     /// The callable.
     handler: Py<PyAny>,
     /// `inspect.iscoroutinefunction(handler)`.
@@ -343,15 +360,12 @@ fn check_spec(
 
     let mut spec = Vec::with_capacity(registration.call_args.len());
     let mut path_seen = 0usize;
-    for (name, source, kind, desc) in &registration.call_args {
-        let source = match CallSource::parse(source) {
-            Some(s) => s,
-            None => {
-                problems.push(format!(
-                    "{label} ({handler_name}): parameter `{name}` has unknown source `{source}`"
-                ));
-                return None;
-            }
+    for (name, source, kind, wire_name, desc, missing) in &registration.call_args {
+        let Some(source) = CallSource::parse(source) else {
+            problems.push(format!(
+                "{label} ({handler_name}): parameter `{name}` has unknown source `{source}`"
+            ));
+            return None;
         };
         let positional = match kind.as_str() {
             "pos_only" => true,
@@ -378,11 +392,33 @@ fn check_spec(
             ));
             return None;
         }
+        if source == CallSource::Header
+            && http::header::HeaderName::from_bytes(wire_name.as_bytes()).is_err()
+        {
+            problems.push(format!(
+                "{label} ({handler_name}): header parameter `{name}` has invalid wire name `{wire_name}`"
+            ));
+            return None;
+        }
+        let missing = match missing {
+            (m, _) if m == "required" => MissingArg::Required,
+            (m, _) if m == "omit" => MissingArg::Omit,
+            (m, obj) if m == "literal" => MissingArg::Value(Arc::new(obj.clone_ref(py))),
+            (m, f) if m == "factory" => MissingArg::Factory(Arc::new(f.clone_ref(py))),
+            (m, _) => {
+                problems.push(format!(
+                    "{label} ({handler_name}): parameter `{name}` has unknown missing kind `{m}`"
+                ));
+                return None;
+            }
+        };
         spec.push(CallSpecArg {
             name: name.clone().into_boxed_str(),
             source,
             positional,
-            desc: desc.as_ref().map(|d| Arc::new(d.clone_ref(py))),
+            wire_name: wire_name.clone().into_boxed_str(),
+            schema: desc.as_ref().map(|d| ParamSchema::new(py, d)),
+            missing,
         });
     }
     if path_seen != registration.param_types.len() {

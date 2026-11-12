@@ -24,7 +24,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use fulmen_schema::desc::{
     Bound as SchemaBound, BytesDesc, ClassRef, DecimalDesc, DictDesc, EnumDesc, EnumKind,
@@ -128,11 +128,11 @@ pub(crate) fn delta_text(obj: &Bound<'_, PyAny>) -> PyResult<String> {
 fn class_ref(obj: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> ClassRef {
     let (mut name, mut module) = (String::new(), String::new());
     if let Ok(d) = obj.cast::<PyDict>() {
-        match get_str(&d, "name") {
+        match get_str(d, "name") {
             Some(s) => name = s,
             None => errs.push(format!("{path}: class.name must be a string")),
         }
-        match get_str(&d, "module") {
+        match get_str(d, "module") {
             Some(s) => module = s,
             None => errs.push(format!("{path}: class.module must be a string")),
         }
@@ -209,10 +209,10 @@ fn bound(obj: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Option<S
     if let Ok(f) = obj.extract::<f64>() {
         return Some(SchemaBound::Float(f));
     }
-    if let Ok(d) = obj.cast::<PyDict>() {
-        if let Some(s) = get_str(&d, "decimal") {
-            return Some(SchemaBound::Decimal(s.into_boxed_str()));
-        }
+    if let Ok(d) = obj.cast::<PyDict>()
+        && let Some(s) = get_str(d, "decimal")
+    {
+        return Some(SchemaBound::Decimal(s.into_boxed_str()));
     }
     errs.push(format!(
         "{path}: bound must be a number or {{\"decimal\": text}}"
@@ -233,7 +233,7 @@ fn range_desc(
         ("le", &mut r.le),
         ("lt", &mut r.lt),
     ] {
-        if let Some(v) = get(&d, key) {
+        if let Some(v) = get(d, key) {
             *slot = bound(&v, errs, &format!("{path}.range.{key}"));
         }
     }
@@ -243,13 +243,13 @@ fn range_desc(
 fn len_desc(obj: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Option<Len> {
     let d = obj.cast::<PyDict>().ok()?;
     let (mut min, mut max) = (None, None);
-    if let Some(v) = get(&d, "min") {
+    if let Some(v) = get(d, "min") {
         match v.extract::<u64>() {
             Ok(n) => min = Some(n),
             Err(_) => errs.push(format!("{path}.len.min must be a non-negative int")),
         }
     }
-    if let Some(v) = get(&d, "max") {
+    if let Some(v) = get(d, "max") {
         match v.extract::<u64>() {
             Ok(n) => max = Some(n),
             Err(_) => errs.push(format!("{path}.len.max must be a non-negative int")),
@@ -260,26 +260,28 @@ fn len_desc(obj: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Optio
 
 fn meta_desc(obj: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Option<Box<TypeMeta>> {
     let d = obj.cast::<PyDict>().ok()?;
-    let mut m = TypeMeta::default();
-    m.alias = get_str(&d, "alias").map(Into::into);
-    m.description = get_str(&d, "description").map(Into::into);
-    m.deprecated = get_bool(&d, "deprecated").unwrap_or(false);
-    if let Some(v) = get(&d, "default") {
+    let mut m = TypeMeta {
+        alias: get_str(d, "alias").map(Into::into),
+        description: get_str(d, "description").map(Into::into),
+        deprecated: get_bool(d, "deprecated").unwrap_or(false),
+        ..TypeMeta::default()
+    };
+    if let Some(v) = get(d, "default") {
         m.default = literal_value(&v, errs, &format!("{path}.meta.default"));
     }
-    if let Some(v) = get(&d, "example") {
+    if let Some(v) = get(d, "example") {
         m.example = literal_value(&v, errs, &format!("{path}.meta.example"));
     }
-    if let Some(t) = get(&d, "transforms") {
+    if let Some(t) = get(d, "transforms") {
         if let Ok(td) = t.cast::<PyDict>() {
-            m.transforms.strip = get_bool(&td, "strip").unwrap_or(false);
-            m.transforms.lower = get_bool(&td, "lower").unwrap_or(false);
-            m.transforms.upper = get_bool(&td, "upper").unwrap_or(false);
+            m.transforms.strip = get_bool(td, "strip").unwrap_or(false);
+            m.transforms.lower = get_bool(td, "lower").unwrap_or(false);
+            m.transforms.upper = get_bool(td, "upper").unwrap_or(false);
         } else {
             errs.push(format!("{path}.meta.transforms must be a dict"));
         }
     }
-    if let Some(a) = get(&d, "after") {
+    if let Some(a) = get(d, "after") {
         if let Ok(l) = a.cast::<PyList>() {
             for item in l.iter() {
                 match item.extract::<u32>() {
@@ -313,13 +315,13 @@ fn missing_desc(obj: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> M
         };
     }
     if let Ok(d) = obj.cast::<PyDict>() {
-        if let Some(v) = get(&d, "literal") {
+        if let Some(v) = get(d, "literal") {
             match literal_value(&v, errs, path) {
                 Some(l) => return Missing::Literal(l),
                 None => return Missing::Required,
             }
         }
-        if let Some(v) = get(&d, "factory") {
+        if let Some(v) = get(d, "factory") {
             match v.extract::<u32>() {
                 Ok(id) => return Missing::Bridge(id),
                 Err(_) => errs.push(format!("{path}: factory must be a callback id (int)")),
@@ -333,28 +335,27 @@ fn missing_desc(obj: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> M
 
 /// Build one `TypeDesc` node from a spec dict. Errors are collected (not
 /// raised) so `compile_descriptor` reports every bad node at once.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per spec 'kind' — the flat match IS the SPEC-FORMAT table; splitting it would scatter the contract"
+)]
 fn build_desc(spec: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Option<TypeDesc> {
-    let d = match spec.cast::<PyDict>() {
-        Ok(d) => d.clone(),
-        Err(_) => {
-            errs.push(format!("{path}: spec node must be a dict"));
-            return None;
-        }
+    let d = if let Ok(d) = spec.cast::<PyDict>() {
+        d.clone()
+    } else {
+        errs.push(format!("{path}: spec node must be a dict"));
+        return None;
     };
-    let kind = match get_str(&d, "kind") {
-        Some(k) => k,
-        None => {
-            errs.push(format!("{path}: missing 'kind'"));
-            return None;
-        }
+    let Some(kind) = get_str(&d, "kind") else {
+        errs.push(format!("{path}: missing 'kind'"));
+        return None;
     };
     let sub = |key: &str, errs: &mut Vec<String>| -> Option<TypeDesc> {
-        match get(&d, key) {
-            Some(v) => build_desc(&v, errs, &format!("{path}.{key}")),
-            None => {
-                errs.push(format!("{path}.{key}: required"));
-                None
-            }
+        if let Some(v) = get(&d, key) {
+            build_desc(&v, errs, &format!("{path}.{key}"))
+        } else {
+            errs.push(format!("{path}.{key}: required"));
+            None
         }
     };
     let int_desc = |errs: &mut Vec<String>| IntDesc {
@@ -413,22 +414,19 @@ fn build_desc(spec: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Op
             len: len_of(errs),
         }),
         "tuple_fixed" => {
-            let items = match get(&d, "items") {
-                Some(v) => match v.cast::<PyList>() {
-                    Ok(l) => l
-                        .iter()
+            let items = if let Some(v) = get(&d, "items") {
+                if let Ok(l) = v.cast::<PyList>() {
+                    l.iter()
                         .enumerate()
                         .filter_map(|(i, s)| build_desc(&s, errs, &format!("{path}.items[{i}]")))
-                        .collect::<Vec<_>>(),
-                    Err(_) => {
-                        errs.push(format!("{path}.items: must be a list"));
-                        Vec::new()
-                    }
-                },
-                None => {
-                    errs.push(format!("{path}.items: required"));
+                        .collect::<Vec<_>>()
+                } else {
+                    errs.push(format!("{path}.items: must be a list"));
                     Vec::new()
                 }
+            } else {
+                errs.push(format!("{path}.items: required"));
+                Vec::new()
             };
             Kind::TupleFixed(TupleFixedDesc {
                 items: items.into_boxed_slice(),
@@ -440,38 +438,34 @@ fn build_desc(spec: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Op
             len: len_of(errs),
         }),
         "literal" => {
-            let members = match get(&d, "members") {
-                Some(v) => match v.cast::<PyList>() {
-                    Ok(l) => l
-                        .iter()
+            let members = if let Some(v) = get(&d, "members") {
+                if let Ok(l) = v.cast::<PyList>() {
+                    l.iter()
                         .enumerate()
                         .filter_map(|(i, m)| {
                             literal_value(&m, errs, &format!("{path}.members[{i}]"))
                         })
-                        .collect::<Vec<_>>(),
-                    Err(_) => {
-                        errs.push(format!("{path}.members: must be a list"));
-                        Vec::new()
-                    }
-                },
-                None => {
-                    errs.push(format!("{path}.members: required"));
+                        .collect::<Vec<_>>()
+                } else {
+                    errs.push(format!("{path}.members: must be a list"));
                     Vec::new()
                 }
+            } else {
+                errs.push(format!("{path}.members: required"));
+                Vec::new()
             };
             Kind::Literal(LiteralDesc {
                 members: members.into_boxed_slice(),
             })
         }
         "enum" => {
-            let cls = match get(&d, "class") {
-                Some(c) => class_ref(&c, errs, path),
-                None => {
-                    errs.push(format!("{path}.class: required"));
-                    ClassRef {
-                        name: "Enum".into(),
-                        module: "enum".into(),
-                    }
+            let cls = if let Some(c) = get(&d, "class") {
+                class_ref(&c, errs, path)
+            } else {
+                errs.push(format!("{path}.class: required"));
+                ClassRef {
+                    name: "Enum".into(),
+                    module: "enum".into(),
                 }
             };
             let flavor = match get_str(&d, "flavor").as_deref() {
@@ -479,15 +473,14 @@ fn build_desc(spec: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Op
                 Some("str") => EnumKind::Str,
                 _ => EnumKind::Plain,
             };
-            let members = match get(&d, "members") {
-                Some(v) => match v.cast::<PyList>() {
-                    Ok(l) => l
-                        .iter()
+            let members = if let Some(v) = get(&d, "members") {
+                if let Ok(l) = v.cast::<PyList>() {
+                    l.iter()
                         .enumerate()
                         .filter_map(|(i, m)| {
                             let md = m.cast::<PyDict>().ok()?;
-                            let name = get_str(&md, "name")?;
-                            let value = get(&md, "value").and_then(|v| {
+                            let name = get_str(md, "name")?;
+                            let value = get(md, "value").and_then(|v| {
                                 literal_value(&v, errs, &format!("{path}.members[{i}]"))
                             })?;
                             Some(EnumMember {
@@ -495,16 +488,14 @@ fn build_desc(spec: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Op
                                 value,
                             })
                         })
-                        .collect::<Vec<_>>(),
-                    Err(_) => {
-                        errs.push(format!("{path}.members: must be a list"));
-                        Vec::new()
-                    }
-                },
-                None => {
-                    errs.push(format!("{path}.members: required"));
+                        .collect::<Vec<_>>()
+                } else {
+                    errs.push(format!("{path}.members: must be a list"));
                     Vec::new()
                 }
+            } else {
+                errs.push(format!("{path}.members: required"));
+                Vec::new()
             };
             Kind::Enum(EnumDesc {
                 class: cls,
@@ -516,22 +507,19 @@ fn build_desc(spec: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Op
             inner: Box::new(sub("inner", errs)?),
         }),
         "union" => {
-            let variants = match get(&d, "variants") {
-                Some(v) => match v.cast::<PyList>() {
-                    Ok(l) => l
-                        .iter()
+            let variants = if let Some(v) = get(&d, "variants") {
+                if let Ok(l) = v.cast::<PyList>() {
+                    l.iter()
                         .enumerate()
                         .filter_map(|(i, s)| build_desc(&s, errs, &format!("{path}.variants[{i}]")))
-                        .collect::<Vec<_>>(),
-                    Err(_) => {
-                        errs.push(format!("{path}.variants: must be a list"));
-                        Vec::new()
-                    }
-                },
-                None => {
-                    errs.push(format!("{path}.variants: required"));
+                        .collect::<Vec<_>>()
+                } else {
+                    errs.push(format!("{path}.variants: must be a list"));
                     Vec::new()
                 }
+            } else {
+                errs.push(format!("{path}.variants: required"));
+                Vec::new()
             };
             Kind::Union(UnionDesc {
                 variants: variants.into_boxed_slice(),
@@ -545,31 +533,30 @@ fn build_desc(spec: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Op
         "generic" => Kind::Generic(GenericDesc {
             origin: Box::new(sub("origin", errs)?),
             args: match get(&d, "args") {
-                Some(v) => match v.cast::<PyList>() {
-                    Ok(l) => l
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, s)| build_desc(&s, errs, &format!("{path}.args[{i}]")))
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                    Err(_) => {
+                Some(v) => {
+                    if let Ok(l) = v.cast::<PyList>() {
+                        l.iter()
+                            .enumerate()
+                            .filter_map(|(i, s)| build_desc(&s, errs, &format!("{path}.args[{i}]")))
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice()
+                    } else {
                         errs.push(format!("{path}.args: must be a list"));
                         Vec::new().into_boxed_slice()
                     }
-                },
+                }
                 None => Vec::new().into_boxed_slice(),
             },
         }),
         "typevar" => Kind::TypeVar(get_str(&d, "name").unwrap_or_default().into_boxed_str()),
         "record" => {
-            let cls = match get(&d, "class") {
-                Some(c) => class_ref(&c, errs, path),
-                None => {
-                    errs.push(format!("{path}.class: required"));
-                    ClassRef {
-                        name: "?".into(),
-                        module: "?".into(),
-                    }
+            let cls = if let Some(c) = get(&d, "class") {
+                class_ref(&c, errs, path)
+            } else {
+                errs.push(format!("{path}.class: required"));
+                ClassRef {
+                    name: "?".into(),
+                    module: "?".into(),
                 }
             };
             let flavor = match get_str(&d, "flavor").as_deref() {
@@ -589,32 +576,36 @@ fn build_desc(spec: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Op
                 Some(_) | None => None,
             };
             let fields = match get(&d, "fields") {
-                Some(v) => match v.cast::<PyList>() {
-                    Ok(l) => l
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, f)| {
-                            let fd = f.cast::<PyDict>().ok()?;
-                            let name = get_str(&fd, "name")?;
-                            let ty = get(&fd, "type").and_then(|t| {
-                                build_desc(&t, errs, &format!("{path}.fields[{i}].type"))
-                            })?;
-                            Some(FieldDesc {
-                                name: name.into_boxed_str(),
-                                alias: get_str(&fd, "alias").map(Into::into),
-                                missing: get(&fd, "missing").map_or(Missing::Required, |m| {
-                                    missing_desc(&m, errs, &format!("{path}.fields[{i}].missing"))
-                                }),
-                                ty,
-                                meta: get(&fd, "meta").and_then(|m| meta_desc(&m, errs, path)),
+                Some(v) => {
+                    if let Ok(l) = v.cast::<PyList>() {
+                        l.iter()
+                            .enumerate()
+                            .filter_map(|(i, f)| {
+                                let fd = f.cast::<PyDict>().ok()?;
+                                let name = get_str(fd, "name")?;
+                                let ty = get(fd, "type").and_then(|t| {
+                                    build_desc(&t, errs, &format!("{path}.fields[{i}].type"))
+                                })?;
+                                Some(FieldDesc {
+                                    name: name.into_boxed_str(),
+                                    alias: get_str(fd, "alias").map(Into::into),
+                                    missing: get(fd, "missing").map_or(Missing::Required, |m| {
+                                        missing_desc(
+                                            &m,
+                                            errs,
+                                            &format!("{path}.fields[{i}].missing"),
+                                        )
+                                    }),
+                                    ty,
+                                    meta: get(fd, "meta").and_then(|m| meta_desc(&m, errs, path)),
+                                })
                             })
-                        })
-                        .collect::<Vec<_>>(),
-                    Err(_) => {
+                            .collect::<Vec<_>>()
+                    } else {
                         errs.push(format!("{path}.fields: must be a list"));
                         Vec::new()
                     }
-                },
+                }
                 None => Vec::new(),
             };
             let type_params = get(&d, "type_params")
@@ -648,6 +639,10 @@ fn build_desc(spec: &Bound<'_, PyAny>, errs: &mut Vec<String>, path: &str) -> Op
 
 /// Convert a Python object into an owned [`Value`] — the input side of
 /// `Descriptor.validate`/`construct`. `pub(crate)` for the extraction task.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one branch per Python input shape — the type-dispatch table reads top to bottom"
+)]
 pub(crate) fn extract_value(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
@@ -730,26 +725,26 @@ pub(crate) fn extract_value(
         return collect_array(py, s.iter(), depth);
     }
     // Non-builtin scalar types via lazy class checks.
-    if obj.is_instance(&cached(py, &DECIMAL, "decimal", "Decimal")?.bind(py))? {
+    if obj.is_instance(cached(py, &DECIMAL, "decimal", "Decimal")?.bind(py))? {
         return Ok(Value::string(obj.str()?.to_str()?.to_owned()));
     }
-    if obj.is_instance(&cached(py, &UUID_CLS, "uuid", "UUID")?.bind(py))? {
+    if obj.is_instance(cached(py, &UUID_CLS, "uuid", "UUID")?.bind(py))? {
         return Ok(Value::string(obj.str()?.to_str()?.to_owned()));
     }
-    if obj.is_instance(&cached(py, &IPV4, "ipaddress", "IPv4Address")?.bind(py))?
-        || obj.is_instance(&cached(py, &IPV6, "ipaddress", "IPv6Address")?.bind(py))?
+    if obj.is_instance(cached(py, &IPV4, "ipaddress", "IPv4Address")?.bind(py))?
+        || obj.is_instance(cached(py, &IPV6, "ipaddress", "IPv6Address")?.bind(py))?
     {
         return Ok(Value::string(obj.str()?.to_str()?.to_owned()));
     }
-    if obj.is_instance(&cached(py, &ENUM, "enum", "Enum")?.bind(py))? {
+    if obj.is_instance(cached(py, &ENUM, "enum", "Enum")?.bind(py))? {
         return extract_value(py, &obj.getattr("value")?, depth + 1);
     }
     // Model and dataclass instances expose their declared state.
     let ty = obj.get_type();
-    if ty.hasattr("__fulmen_model__")? || ty.hasattr("__dataclass_fields__")? {
-        if let Ok(state) = obj.getattr("__dict__") {
-            return extract_value(py, &state, depth + 1);
-        }
+    if (ty.hasattr("__fulmen_model__")? || ty.hasattr("__dataclass_fields__")?)
+        && let Ok(state) = obj.getattr("__dict__")
+    {
+        return extract_value(py, &state, depth + 1);
     }
     if ty.hasattr("__dataclass_fields__")? {
         // Slotted dataclass — no __dict__; read each declared field.
@@ -819,7 +814,8 @@ fn resolve_class<'py>(
 }
 
 /// `desc`/`value`-agnostic materialization for `Any`/`Raw` and record extras.
-fn value_to_py(py: Python<'_>, value: &Value<'_>) -> PyResult<Py<PyAny>> {
+/// `pub(crate)` for the extraction path's descriptor-free values.
+pub(crate) fn value_to_py(py: Python<'_>, value: &Value<'_>) -> PyResult<Py<PyAny>> {
     match value {
         Value::Null => Ok(py.None()),
         Value::Bool(b) => Ok(PyBool::new(py, *b).to_owned().unbind().into_any()),
@@ -862,6 +858,14 @@ fn call1<'py>(
 
 /// Materialize a validated [`Value`] into the Python object `desc` declares.
 /// After-validator hooks (`meta.after`) run on the materialized object.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per `Kind` — the materialization table mirrors `desc::Kind` 1:1"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "int→f64 coercion is the defined `float` materialization (desc.rs documents the >2^53 rounding)"
+)]
 fn materialize<'a>(
     py: Python<'a>,
     ctx: &MatCtx<'_>,
@@ -895,7 +899,9 @@ fn materialize<'a>(
                 .into_any(),
             other => return Err(internal_shape("float", other)),
         },
-        Kind::Str(_) | Kind::Any | Kind::Raw => value_to_py(py, value)?,
+        Kind::Str(_) | Kind::Any | Kind::Raw | Kind::Literal(_) | Kind::NewType(_) => {
+            value_to_py(py, value)?
+        }
         Kind::Bytes(_) => match value {
             Value::Bytes(b) => PyBytes::new(py, b).unbind().into_any(),
             other => return Err(internal_shape("bytes", other)),
@@ -937,10 +943,17 @@ fn materialize<'a>(
                 let td = cached(py, &TIMEDELTA, "datetime", "timedelta")?;
                 match fulmen_schema::parse::parse_iso8601_duration(s) {
                     Some(p) => {
+                        // `timedelta` range-checks its arguments itself;
+                        // clamping only silences the u64→i64 wrap lint.
+                        let (d, s_, m) = (
+                            i64::try_from(p.days).unwrap_or(i64::MAX),
+                            i64::try_from(p.seconds).unwrap_or(i64::MAX),
+                            i64::try_from(p.micros).unwrap_or(i64::MAX),
+                        );
                         let (d, s_, m) = if p.negative {
-                            (-(p.days as i64), -(p.seconds as i64), -(p.micros as i64))
+                            (-d, -s_, -m)
                         } else {
-                            (p.days as i64, p.seconds as i64, p.micros as i64)
+                            (d, s_, m)
                         };
                         let kwargs = PyDict::new(py);
                         kwargs.set_item("days", d)?;
@@ -1029,7 +1042,6 @@ fn materialize<'a>(
             }
             other => return Err(internal_shape("object", other)),
         },
-        Kind::Literal(_) | Kind::NewType(_) => value_to_py(py, value)?,
         Kind::Enum(d) => {
             let cls = resolve_class(py, ctx, &d.class)?;
             cls.call1((value_to_py(py, value)?,))?.unbind()
@@ -1073,7 +1085,7 @@ fn run_after_hooks(
     mut obj: Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
     let Some(meta) = meta else { return Ok(obj) };
-    for id in meta.after.iter() {
+    for id in &meta.after {
         let Some(cb) = ctx.callbacks.get(*id as usize) else {
             return Err(PyTypeError::new_err(format!(
                 "after-validator callback id {id} out of range"
@@ -1094,24 +1106,23 @@ fn materialize_union<'a>(
     scope: &Scope<'a>,
     value: &Value<'_>,
 ) -> PyResult<Py<PyAny>> {
-    if let Some(tag) = &d.tag {
-        if let Value::Object(pairs) = value {
-            let tag_val = pairs
-                .iter()
-                .find(|(k, _)| &**k == &**tag)
-                .map(|(_, v)| v.as_str().map(str::to_owned))
-                .flatten();
-            if let Some(tag_val) = tag_val {
-                for v in &d.variants {
-                    let Some(rec) = record_of(v) else { continue };
-                    let matches = rec.fields.iter().any(|f| {
-                        &*f.name == &**tag
-                            && matches!(&f.ty.kind, Kind::Literal(l)
+    if let Some(tag) = &d.tag
+        && let Value::Object(pairs) = value
+    {
+        let tag_val = pairs
+            .iter()
+            .find(|(k, _)| **k == **tag)
+            .and_then(|(_, v)| v.as_str().map(str::to_owned));
+        if let Some(tag_val) = tag_val {
+            for v in &d.variants {
+                let Some(rec) = record_of(v) else { continue };
+                let matches = rec.fields.iter().any(|f| {
+                    *f.name == **tag
+                        && matches!(&f.ty.kind, Kind::Literal(l)
                                 if l.members.iter().any(|m| literal_text(m) == tag_val))
-                    });
-                    if matches {
-                        return materialize(py, ctx, v, scope, value);
-                    }
+                });
+                if matches {
+                    return materialize(py, ctx, v, scope, value);
                 }
             }
         }
@@ -1120,14 +1131,14 @@ fn materialize_union<'a>(
     // scalars pick the first shape-compatible variant.
     let mut best: Option<(&TypeDesc, usize)> = None;
     for v in &d.variants {
-        let score = variant_fit(v, value);
-        match (best, score) {
-            (_, Some(s)) if best.is_none() || s > best.map(|(_, bs)| bs).unwrap_or(0) => {
+        let fit = variant_fit(v, value);
+        match (best, fit) {
+            (_, Some(s)) if best.is_none() || s > best.map_or(0, |(_, bs)| bs) => {
                 best = Some((v, s));
             }
             _ => {}
         }
-        if matches!(score, Some(s) if s == usize::MAX) {
+        if matches!(fit, Some(usize::MAX)) {
             break;
         }
     }
@@ -1147,14 +1158,13 @@ fn record_of(desc: &TypeDesc) -> Option<&RecordDesc> {
 
 fn literal_text(l: &LiteralValue) -> String {
     match l {
-        LiteralValue::Null => String::new(),
         LiteralValue::Bool(b) => b.to_string(),
         LiteralValue::Int(i) => i.to_string(),
         LiteralValue::UInt(u) => u.to_string(),
         LiteralValue::BigInt(t) => t.to_string(),
         LiteralValue::Float(f) => format!("{f:?}"),
         LiteralValue::Str(s) => s.to_string(),
-        LiteralValue::Bytes(_) => String::new(),
+        LiteralValue::Null | LiteralValue::Bytes(_) => String::new(),
     }
 }
 
@@ -1162,13 +1172,13 @@ fn literal_text(l: &LiteralValue) -> String {
 /// `usize::MAX` = exact-shape record/scalar match.
 fn variant_fit(desc: &TypeDesc, value: &Value<'_>) -> Option<usize> {
     let fits = match (&desc.kind, value) {
-        (Kind::Bool, Value::Bool(_)) => usize::MAX,
-        (Kind::Int(_), Value::Int(_) | Value::UInt(_) | Value::BigInt(_)) => usize::MAX,
-        (Kind::Float(_), Value::Float(_) | Value::Int(_) | Value::UInt(_) | Value::BigInt(_)) => 2,
-        (Kind::Str(_), Value::Str(_)) => usize::MAX,
-        (Kind::Bytes(_), Value::Bytes(_)) => usize::MAX,
-        (Kind::Null, Value::Null) => usize::MAX,
-        (
+        (Kind::Bool, Value::Bool(_))
+        | (Kind::Int(_), Value::Int(_) | Value::UInt(_) | Value::BigInt(_))
+        | (Kind::Str(_), Value::Str(_))
+        | (Kind::Bytes(_), Value::Bytes(_))
+        | (Kind::Null | Kind::Optional(_), Value::Null) => usize::MAX,
+        (Kind::Float(_), Value::Float(_) | Value::Int(_) | Value::UInt(_) | Value::BigInt(_))
+        | (
             Kind::Decimal(_)
             | Kind::DateTime
             | Kind::Date
@@ -1182,36 +1192,35 @@ fn variant_fit(desc: &TypeDesc, value: &Value<'_>) -> Option<usize> {
             | Kind::Literal(_)
             | Kind::Enum(_),
             Value::Str(_),
-        ) => 2,
-        (Kind::Enum(_) | Kind::Literal(_), Value::Int(_) | Value::Bool(_)) => 2,
-        (
+        )
+        | (Kind::Enum(_) | Kind::Literal(_), Value::Int(_) | Value::Bool(_))
+        | (
             Kind::List(_)
             | Kind::Set(_)
             | Kind::FrozenSet(_)
             | Kind::TupleVar(_)
             | Kind::TupleFixed(_),
             Value::Array(_),
-        ) => 2,
-        (Kind::Dict(_), Value::Object(_)) => 2,
-        (Kind::Optional(_), Value::Null) => usize::MAX,
+        )
+        | (Kind::Dict(_), Value::Object(_)) => 2,
         (Kind::Optional(inner), v) => variant_fit(&inner.inner, v).map(|s| s + 1)?,
         (Kind::NewType(n), v) => variant_fit(&n.inner, v).map(|s| s + 1)?,
         (Kind::Record(rec), Value::Object(pairs)) => {
             let mut cover = 0usize;
             for (k, _) in pairs {
-                if rec.fields.iter().any(|f| &*f.name == &**k) {
+                if rec.fields.iter().any(|f| *f.name == **k) {
                     cover += 1;
                 }
             }
             Some(cover).filter(|_| {
                 rec.fields.iter().all(|f| {
-                    f.missing != Missing::Required || pairs.iter().any(|(k, _)| &**k == &*f.name)
+                    f.missing != Missing::Required || pairs.iter().any(|(k, _)| **k == *f.name)
                 })
             })?;
             cover
         }
         (Kind::Generic(g), v) => variant_fit(&g.origin, v).map(|s| s + 1)?,
-        (Kind::TypeVar(_), _) | (Kind::Any, _) | (Kind::Raw, _) => 1,
+        (Kind::TypeVar(_) | Kind::Any | Kind::Raw, _) => 1,
         _ => return None,
     };
     Some(fits)
@@ -1227,7 +1236,6 @@ fn materialize_key<'a>(
     text: &str,
 ) -> PyResult<Py<PyAny>> {
     let obj = match &desc.kind {
-        Kind::Str(_) | Kind::Any | Kind::Raw => PyString::new(py, text).unbind().into_any(),
         Kind::Int(_) => match text.parse::<i64>() {
             Ok(i) => i.into_pyobject(py)?.unbind().into_any(),
             Err(_) => match text.parse::<u64>() {
@@ -1358,7 +1366,7 @@ fn materialize_record<'a>(
                 };
                 out.set_item(&**k, val)?;
             }
-            return Ok(out.unbind().into_any());
+            Ok(out.unbind().into_any())
         }
         RecordKind::Dataclass => {
             let cls = resolve_class(py, ctx, &rec.class)?;
@@ -1376,7 +1384,7 @@ fn materialize_record<'a>(
                         kwargs.set_item(&**k, val)?;
                     }
                     None => extras.push((
-                        PyString::new(py, &**k).into_any(),
+                        PyString::new(py, k).into_any(),
                         value_to_py(py, v)?.bind(py).clone(),
                     )),
                 }
@@ -1405,17 +1413,17 @@ fn materialize_record<'a>(
                 set_.bind(py).call1((&obj, &**k, val))?;
             }
             // Bridge defaults (default_factory) for keys the validator left out.
-            for f in rec.fields.iter() {
-                if let Missing::Bridge(id) = f.missing {
-                    if pairs.iter().all(|(k, _)| &**k != &*f.name) {
-                        let Some(cb) = ctx.callbacks.get(id as usize) else {
-                            return Err(PyTypeError::new_err(format!(
-                                "default-factory callback id {id} out of range"
-                            )));
-                        };
-                        let produced = cb.bind(py).call0()?;
-                        set_.bind(py).call1((&obj, &*f.name, produced))?;
-                    }
+            for f in &rec.fields {
+                if let Missing::Bridge(id) = f.missing
+                    && pairs.iter().all(|(k, _)| **k != *f.name)
+                {
+                    let Some(cb) = ctx.callbacks.get(id as usize) else {
+                        return Err(PyTypeError::new_err(format!(
+                            "default-factory callback id {id} out of range"
+                        )));
+                    };
+                    let produced = cb.bind(py).call0()?;
+                    set_.bind(py).call1((&obj, &*f.name, produced))?;
                 }
             }
             run_after_hooks(py, ctx, desc.meta.as_deref(), obj.unbind())
@@ -1477,10 +1485,12 @@ struct FieldSlot {
 }
 
 /// A compiled spec tree: the `Validator` plus the `TypeDesc` it came from
-/// (OpenAPI and the extraction task read descriptor metadata through it).
+/// (`OpenAPI` and the extraction task read descriptor metadata through it).
 #[pyclass(frozen)]
 pub(crate) struct Descriptor {
-    validator: Validator,
+    /// `Arc` so the dispatch path can validate request parameters without
+    /// touching the GIL (`fulmen-py::extract`); `Validator` is `Send`/`Sync`.
+    validator: Arc<Validator>,
     desc: TypeDesc,
     spec: Py<PyAny>,
     callbacks: Vec<Py<PyAny>>,
@@ -1515,6 +1525,24 @@ impl Descriptor {
         let scope = Scope::new();
         materialize(py, &self.mat_ctx(), &self.desc, &scope, &out)
     }
+
+    /// The compiled validator, shared with the GIL-free extraction path.
+    pub(crate) fn validator_arc(&self) -> Arc<Validator> {
+        Arc::clone(&self.validator)
+    }
+
+    /// The descriptor's `TypeDesc` (for kind checks at extraction).
+    pub(crate) fn type_desc(&self) -> &TypeDesc {
+        &self.desc
+    }
+
+    /// Materialize an *already validated* `Value` — the extraction path
+    /// validates at dispatch time and only materialization (rich types,
+    /// `AfterValidator` hooks) needs the GIL.
+    pub(crate) fn do_materialize(&self, py: Python<'_>, value: &Value<'_>) -> PyResult<Py<PyAny>> {
+        let scope = Scope::new();
+        materialize(py, &self.mat_ctx(), &self.desc, &scope, value)
+    }
 }
 
 #[pymethods]
@@ -1536,6 +1564,10 @@ impl Descriptor {
     /// Returns the materialized Python object; raises
     /// `fulmen.errors.ValidationError` carrying `entries` + `truncated`.
     #[pyo3(signature = (obj, *, source = "body", lax = false))]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pymethod arguments are extracted by value — `Bound` is the pyo3 convention"
+    )]
     fn validate(
         &self,
         py: Python<'_>,
@@ -1556,6 +1588,10 @@ impl Descriptor {
     /// every emitted field onto `instance`. The native half of
     /// `Model.__init__`.
     #[pyo3(signature = (instance, data, *, lax = false))]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pymethod arguments are extracted by value — `Bound` is the pyo3 convention"
+    )]
     fn construct(
         &self,
         py: Python<'_>,
@@ -1585,7 +1621,7 @@ impl Descriptor {
         let ctx = self.mat_ctx();
         let scope = Scope::new();
         for (k, v) in pairs {
-            let val = match rec.fields.iter().find(|f| &*f.name == &**k) {
+            let val = match rec.fields.iter().find(|f| *f.name == **k) {
                 Some(f) => run_after_hooks(
                     py,
                     &ctx,
@@ -1596,17 +1632,17 @@ impl Descriptor {
             };
             set_.bind(py).call1((&instance, &**k, val))?;
         }
-        for f in rec.fields.iter() {
-            if let Missing::Bridge(id) = f.missing {
-                if pairs.iter().all(|(k, _)| &**k != &*f.name) {
-                    let Some(cb) = self.callbacks.get(id as usize) else {
-                        return Err(PyTypeError::new_err(format!(
-                            "default-factory callback id {id} out of range"
-                        )));
-                    };
-                    let produced = cb.bind(py).call0()?;
-                    set_.bind(py).call1((&instance, &*f.name, produced))?;
-                }
+        for f in &rec.fields {
+            if let Missing::Bridge(id) = f.missing
+                && pairs.iter().all(|(k, _)| **k != *f.name)
+            {
+                let Some(cb) = self.callbacks.get(id as usize) else {
+                    return Err(PyTypeError::new_err(format!(
+                        "default-factory callback id {id} out of range"
+                    )));
+                };
+                let produced = cb.bind(py).call0()?;
+                set_.bind(py).call1((&instance, &*f.name, produced))?;
             }
         }
         Ok(())
@@ -1615,6 +1651,10 @@ impl Descriptor {
     /// `validate_field(name, value, *, lax=False)` — validate one declared
     /// record field; the native half of `Model.__setattr__`.
     #[pyo3(signature = (name, value, *, lax = false))]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pymethod arguments are extracted by value — `Bound` is the pyo3 convention"
+    )]
     fn validate_field(
         &self,
         py: Python<'_>,
@@ -1642,9 +1682,7 @@ impl Descriptor {
             .as_ref()
             .map(|r| r.fields.iter().map(|f| &*f.name).collect())
             .unwrap_or_default();
-        PyList::new(py, names)
-            .map(|l| l.unbind().into_any())
-            .unwrap_or_else(|_| py.None())
+        PyList::new(py, names).map_or_else(|_| py.None(), |l| l.unbind().into_any())
     }
 
     /// The declared record class, resolved lazily (None for non-records).
@@ -1686,7 +1724,7 @@ pub(crate) fn compile_descriptor(
         return Err(PyValueError::new_err(errs.join("\n  ")));
     }
     let validator = match compile(&desc) {
-        Ok(v) => v,
+        Ok(v) => Arc::new(v),
         Err(ce) => {
             let mut msg = vec!["descriptor compile errors:".to_owned()];
             for e in ce.entries() {
@@ -1699,7 +1737,7 @@ pub(crate) fn compile_descriptor(
     let mut fields = HashMap::new();
     let mut record = None;
     if let Kind::Record(rec) = &desc.kind {
-        for f in rec.fields.iter() {
+        for f in &rec.fields {
             if let Ok(v) = compile(&f.ty) {
                 fields.insert(
                     f.name.clone(),

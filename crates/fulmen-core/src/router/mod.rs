@@ -184,10 +184,10 @@ impl CompiledApp {
             let mr = routers.get_or_insert_with(&decl.method, MethodRouters::new);
             match mr.primary.insert(spec.path.clone(), infos.len()) {
                 Ok(()) => {
-                    if spec.all_str {
-                        if let Err(err) = mr.str_only.insert(spec.path.clone(), infos.len()) {
-                            errors.push(map_insert_error(spec.label(&decl), err));
-                        }
+                    if spec.all_str
+                        && let Err(err) = mr.str_only.insert(spec.path.clone(), infos.len())
+                    {
+                        errors.push(map_insert_error(spec.label(&decl), err));
                     }
                     infos.push(spec.into_info(decl));
                 }
@@ -215,10 +215,10 @@ impl CompiledApp {
         if let Some(hit) = self.try_method(method, path) {
             return RouteLookup::Hit(hit);
         }
-        if method == Method::HEAD {
-            if let Some(hit) = self.try_method(&Method::GET, path) {
-                return RouteLookup::Hit(hit.implicit_head());
-            }
+        if method == Method::HEAD
+            && let Some(hit) = self.try_method(&Method::GET, path)
+        {
+            return RouteLookup::Hit(hit.implicit_head());
         }
         match self.trailing_slash {
             TrailingSlash::Strict => {}
@@ -268,10 +268,8 @@ impl CompiledApp {
         let mut extra = Vec::new();
         for (method, mr) in self.routers.iter() {
             let mut found = self.hit_in(mr, path).is_some();
-            if !found {
-                if let Some(alt) = &alt {
-                    found = self.hit_in(mr, alt).is_some();
-                }
+            if !found && let Some(alt) = &alt {
+                found = self.hit_in(mr, alt).is_some();
             }
             if !found {
                 continue;

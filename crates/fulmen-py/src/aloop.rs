@@ -31,7 +31,7 @@ use pyo3::types::PyModule;
 use tokio::sync::oneshot;
 
 use crate::app::StartupError;
-use crate::convert::{self, CallOutcome, InvokeError, ParamArg, PyCtx};
+use crate::convert::{self, CallOutcome, ErrorTable, InvokeError, JobAnswer, ParamArg, PyCtx};
 
 /// How long [`AsyncLoop::start`] waits for the loop thread to report ready.
 const LOOP_READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -103,8 +103,12 @@ struct AsyncJob {
     label: Box<str>,
     /// When the request entered the queue (queue-deadline basis).
     enqueued: Instant,
-    /// Completes with the wire response.
-    respond: oneshot::Sender<fulmen_server::Response>,
+    /// `-> None`/`-> NoContent` declared: `None` returns answer `204`.
+    none_ok: bool,
+    /// `false` on `on_error`-handler jobs: their failures never defer again.
+    route_errors: bool,
+    /// Completes with the wire response or a deferred `on_error` call.
+    respond: oneshot::Sender<JobAnswer>,
 }
 
 /// The `job_id -> completion` entry kept while a task runs.
@@ -113,8 +117,12 @@ struct Pending {
     label: Box<str>,
     /// The handler object, kept for error log lines.
     callable: Arc<Py<PyAny>>,
-    /// Completes with the wire response.
-    respond: oneshot::Sender<fulmen_server::Response>,
+    /// The job's `none_ok`/`route_errors` flags, for `complete`'s ctx.
+    none_ok: bool,
+    /// `false` on `on_error`-handler jobs.
+    route_errors: bool,
+    /// Completes with the wire response or a deferred `on_error` call.
+    respond: oneshot::Sender<JobAnswer>,
 }
 
 struct AsyncQueue {
@@ -182,6 +190,8 @@ struct AsyncShared {
     deadline: Duration,
     logger: Arc<Py<PyAny>>,
     response_cls: Arc<Py<PyAny>>,
+    /// The app's `@app.on_error` table (§17).
+    errors: Arc<ErrorTable>,
 }
 
 /// Lock a mutex, recovering from poison.
@@ -259,6 +269,7 @@ impl AsyncLoop {
         deadline: Duration,
         logger: Arc<Py<PyAny>>,
         response_cls: Arc<Py<PyAny>>,
+        errors: Arc<ErrorTable>,
     ) -> PyResult<Self> {
         let shared = Arc::new(AsyncShared {
             queue: Mutex::new(AsyncQueue {
@@ -272,6 +283,7 @@ impl AsyncLoop {
             deadline,
             logger,
             response_cls,
+            errors,
         });
         let ready = Arc::new(Ready {
             slot: Mutex::new(None),
@@ -312,7 +324,9 @@ impl AsyncLoop {
         callable: Arc<Py<PyAny>>,
         args: Box<[ParamArg]>,
         label: Box<str>,
-        respond: oneshot::Sender<fulmen_server::Response>,
+        none_ok: bool,
+        route_errors: bool,
+        respond: oneshot::Sender<JobAnswer>,
     ) -> Result<(), AsyncSubmitError> {
         let wake = {
             let mut queue = self.shared.lock_queue();
@@ -326,6 +340,8 @@ impl AsyncLoop {
                 args,
                 label,
                 enqueued: Instant::now(),
+                none_ok,
+                route_errors,
                 respond,
             });
             was_empty
@@ -489,6 +505,9 @@ impl AsyncPump {
         let ctx = PyCtx {
             logger: &self.shared.logger,
             response_cls: &self.shared.response_cls,
+            errors: &self.shared.errors,
+            none_ok: pending.none_ok,
+            route_errors: pending.route_errors,
             label: &pending.label,
         };
         let outcome = match task.call_method0(py, "result") {
@@ -502,11 +521,12 @@ impl AsyncPump {
                 convert::settle(py, Err(InvokeError::Handler(err)), &pending.callable, &ctx)
             }
         };
-        let response = match outcome {
-            CallOutcome::Return(ret) => convert::into_response(ret),
-            CallOutcome::Failed => convert::internal_error(),
+        let answer = match outcome {
+            CallOutcome::Return(ret) => JobAnswer::Response(convert::into_response(ret)),
+            CallOutcome::Deferred(call) => JobAnswer::Deferred(call),
+            CallOutcome::Failed => JobAnswer::Response(convert::internal_error()),
         };
-        let _ = pending.respond.send(response);
+        let _ = pending.respond.send(answer);
     }
 }
 
@@ -517,10 +537,15 @@ impl AsyncPump {
         let ctx = PyCtx {
             logger: &self.shared.logger,
             response_cls: &self.shared.response_cls,
+            errors: &self.shared.errors,
+            none_ok: job.none_ok,
+            route_errors: job.route_errors,
             label: &job.label,
         };
         if job.enqueued.elapsed() > self.shared.deadline {
-            let _ = job.respond.send(convert::service_unavailable());
+            let _ = job
+                .respond
+                .send(JobAnswer::Response(convert::service_unavailable()));
             return;
         }
         // Build arguments and call the async def -> coroutine object. A
@@ -559,7 +584,9 @@ impl AsyncPump {
                     job.label
                 ),
             );
-            let _ = job.respond.send(convert::internal_error());
+            let _ = job
+                .respond
+                .send(JobAnswer::Response(convert::internal_error()));
             return;
         };
         if let Err(err) = task.call_method1(py, "add_done_callback", (bound,)) {
@@ -575,17 +602,21 @@ impl AsyncPump {
             Pending {
                 label: job.label.clone(),
                 callable: Arc::clone(&job.callable),
+                none_ok: job.none_ok,
+                route_errors: job.route_errors,
                 respond: job.respond,
             },
         );
     }
 
-    /// Send `job`'s wire response for an already-settled outcome.
+    /// Send `job`'s answer for an already-settled outcome: a wire
+    /// response, or a deferred `on_error` call for the dispatcher.
     fn answer(job: AsyncJob, outcome: CallOutcome) {
-        let response = match outcome {
-            CallOutcome::Return(ret) => convert::into_response(ret),
-            CallOutcome::Failed => convert::internal_error(),
+        let answer = match outcome {
+            CallOutcome::Return(ret) => JobAnswer::Response(convert::into_response(ret)),
+            CallOutcome::Deferred(call) => JobAnswer::Deferred(call),
+            CallOutcome::Failed => JobAnswer::Response(convert::internal_error()),
         };
-        let _ = job.respond.send(response);
+        let _ = job.respond.send(answer);
     }
 }
