@@ -1163,6 +1163,14 @@ def test_create_user():
 
 ### 23.2 Across the wire
 
+- The app object generates the document itself: `Fulmen(title=...,
+  version=..., description=..., contact=..., license=..., servers=...,
+  tags=..., openapi_url="/openapi.json", docs_url="/docs")` and
+  `app.openapi()` render OpenAPI 3.1 from the schema IR once at compile
+  time (JSON Schema 2020-12). `/openapi.json` serves the frozen bytes and
+  `docs_url` mounts a self-hosted Swagger UI page; both are synthetic GET
+  routes a declared route can shadow, and `openapi_url=None` disables
+  them (zero cost) while `docs_url=None` drops only the UI.
 - `fulmen gen openapi` writes OpenAPI 3.1 from the schema IR. Every route,
   parameter, response union member, error and security scheme is included.
 - `fulmen gen client --lang ts` writes a typed TypeScript client (fetch-based,
