@@ -1,5 +1,7 @@
 """Fulmen: a hyper-fast, type-safe Python backend framework with a Rust core."""
 
+import typing
+
 from fulmen._fulmen import StartupError, __version__, native_components
 from fulmen.app import Fulmen
 from fulmen.constraints import (
@@ -71,6 +73,20 @@ from fulmen.responses import (
 )
 from fulmen.types import Email, Raw, Url
 
+if typing.TYPE_CHECKING:
+    from fulmen.adapters.pydantic import PydanticValidator
+
+
+def __getattr__(name: str) -> object:
+    # Adapters stay lazy: `fulmen.PydanticValidator` resolves on first
+    # access so `import fulmen` never pulls adapter code (or pydantic).
+    if name == "PydanticValidator":
+        from fulmen.adapters.pydantic import PydanticValidator
+
+        return PydanticValidator
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "Accepted",
     "AfterValidator",
@@ -115,6 +131,7 @@ __all__ = [
     "Pattern",
     "PayloadTooLarge",
     "PreconditionFailed",
+    "PydanticValidator",
     "Query",
     "Range",
     "Raw",
