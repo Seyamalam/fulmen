@@ -174,10 +174,10 @@ OpenAPI at `/openapi.json` with a docs UI, Pydantic adapter.
 
 ### Guardrails added in M2
 
-- [ ] M2.18 Type tests in `python/tests/typing/` checked by pyright in `just ci`
-- [ ] M2.19 `cargo-fuzz` targets for the JSON decoder and multipart parser (`just fuzz`, run before each release)
-- [ ] M2.20 Property tests (`proptest`) for encode → decode round trips
-- [ ] M2.21 Coverage floor raised to 85%
+- [x] M2.18 Type tests in `python/tests/typing/` checked by pyright in `just ci`
+- [x] M2.19 `cargo-fuzz` targets for the JSON decoder and the lax text-source parsers (`just fuzz`/`fuzz-smoke`; the one-hour run gates release/milestone exit — a multipart-parser target lands with the multipart parser itself, still pending in M2.13)
+- [x] M2.20 Property tests (`proptest`) for encode → decode round trips
+- [x] M2.21 Coverage floor raised to 85%
 
 ### Exit criteria
 

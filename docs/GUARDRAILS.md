@@ -25,6 +25,7 @@ git config.
 | Every commit         | `just pre-commit` | rustfmt and ruff format check, typos, `scripts/guardrails.py`             |
 | Every commit message | `commit-msg` hook | Conventional Commits header, DCO `Signed-off-by`                          |
 | Every push           | `just ci`         | everything above, plus clippy, ruff lint, pyright strict, cargo-deny, Rust tests, Python tests with coverage, Python 3.12/3.13/3.14/3.14t matrix |
+| Before a release / milestone exit | `just fuzz` | nightly `cargo-fuzz` targets for the `fulmen-schema` JSON decoder and lax text-source parsers — the M2 exit bar is one hour per target without findings (`just fuzz-smoke` is a ~30 s pass for development) |
 | Every release        | `just release`    | clean `main` in sync with origin, changelog entry, `just ci`, build, wheel smoke tests, confirmation prompt |
 
 Skipping a hook with `--no-verify` is allowed for work-in-progress on a local

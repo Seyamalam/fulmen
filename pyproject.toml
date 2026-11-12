@@ -83,10 +83,10 @@ branch = true
 
 [tool.coverage.report]
 # Raised milestone by milestone, see docs/ROADMAP.md. Never lowered.
-fail_under = 80
+fail_under = 85
 show_missing = true
 
 [tool.pyright]
-include = ["python/fulmen", "scripts"]
+include = ["python/fulmen", "python/tests/typing", "scripts"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

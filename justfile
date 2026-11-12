@@ -92,6 +92,26 @@ commits:
 cov-rust:
     cargo llvm-cov --workspace --exclude fulmen-py --html
 
+# ---- fuzzing (ROADMAP M2.19) ----------------------------------------------
+
+# cargo-fuzz targets live in crates/fulmen-schema/fuzz — a separate
+# workspace that needs nightly + sanitizer flags. Seed corpora are
+# committed under crates/fulmen-schema/fuzz/corpus/; libFuzzer grows them
+# per run. Kept out of `just ci`: it requires a nightly toolchain and the
+# M2 exit bar is a dedicated one-hour-per-target run (docs/DESIGN.md §25),
+# not a per-push gate.
+
+# Fuzz every target `seconds` each (default one hour — the M2 exit run).
+fuzz seconds="3600":
+    @command -v cargo-fuzz >/dev/null || { echo "install cargo-fuzz: cargo install --locked cargo-fuzz"; exit 1; }
+    @for t in decode_json decode_query decode_form decode_and_validate; do \
+        echo "== fuzzing $t for {{seconds}}s"; \
+        (cd crates/fulmen-schema && cargo +nightly fuzz run "$t" -- -max_total_time={{seconds}}); \
+    done
+
+# Short pass for local/CI smoke — ~30s per target.
+fuzz-smoke: (fuzz "30")
+
 # ---- benchmarks (M1.25–M1.27) --------------------------------------------
 
 # Release build into both venvs, then the full e2e matrix; writes

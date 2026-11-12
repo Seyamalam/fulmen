@@ -27,6 +27,8 @@ criterion = "0.8.2"
 # Pattern constraint (DESIGN.md §11.2): finite-automata regex, no backtracking,
 # so no ReDoS. Used by fulmen-schema.
 regex = "1.13"
+# Property tests for the schema engine (ROADMAP M2.20) — dev-dependency only.
+proptest = "1.12"
 
 # HTTP transport stack for fulmen-server (DESIGN.md decision D2).
 tokio = { version = "1.48", features = [
