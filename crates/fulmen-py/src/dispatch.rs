@@ -32,10 +32,26 @@ use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
 use crate::aloop::{AsyncLoop, AsyncSubmitError};
-use crate::convert::{self, ArgKind, JobAnswer, ParamArg, ParamValue};
+use crate::convert::{self, ArgKind, ErrorTable, JobAnswer, ParamArg, ParamValue};
 use crate::descriptor::Descriptor;
 use crate::extract;
 use crate::pool::{SubmitError, SyncJob, SyncPool};
+
+/// The per-app dependencies every execution lane needs to build a
+/// [`convert::PyCtx`] — imported Python handles plus the runtime flags.
+/// Bundled so `SyncPool`/`AsyncLoop` stay under the argument limit and
+/// adding a flag touches one struct, not four signatures.
+#[derive(Clone)]
+pub(crate) struct LaneDeps {
+    /// `logging.getLogger("fulmen")`.
+    pub(crate) logger: Arc<Py<PyAny>>,
+    /// The `fulmen.responses.Response` class object.
+    pub(crate) response_cls: Arc<Py<PyAny>>,
+    /// The app's `@app.on_error` table (§17).
+    pub(crate) errors: Arc<ErrorTable>,
+    /// `Fulmen(debug=True)`/`serve(debug=…)`: output validation (§11.6).
+    pub(crate) debug: bool,
+}
 
 /// Where a handler parameter's value comes from (`call_args[i].source`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

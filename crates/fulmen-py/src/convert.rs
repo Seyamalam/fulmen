@@ -227,7 +227,7 @@ pub(crate) struct PyCtx<'a> {
     /// The route's declared response contract — picks the encode
     /// descriptor by actual response status.
     pub(crate) contract: &'a ResponseContract,
-    /// `Fulmen(debug=True)`/`serve(debug=…)` — §14.2 output validation.
+    /// `Fulmen(debug=True)`/`serve(debug=…)` — §11.6 output validation.
     pub(crate) debug: bool,
 }
 
@@ -542,36 +542,36 @@ fn contract_body(
                 }
             }
             TryOut::Done(chan, value) => {
-                if ctx.debug {
-                    if let Err(errors) = output_check(variant, &value) {
-                        log_message(
-                            py,
-                            ctx.logger,
-                            format!(
-                                "{}: response failed output validation ({} error{})",
-                                ctx.label,
-                                errors.len(),
-                                if errors.len() == 1 { "" } else { "s" },
+                if ctx.debug
+                    && let Err(errors) = output_check(variant, &value)
+                {
+                    log_message(
+                        py,
+                        ctx.logger,
+                        format!(
+                            "{}: response failed output validation ({} error{})",
+                            ctx.label,
+                            errors.len(),
+                            if errors.len() == 1 { "" } else { "s" },
+                        ),
+                    );
+                    return Ok(Some((
+                        StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                        PyReturn::Problem {
+                            status: StatusCode::INTERNAL_SERVER_ERROR,
+                            headers: Vec::new(),
+                            body: problem_json(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                RESPONSE_PROBLEM_TYPE,
+                                "Response validation failed",
+                                Some(format!(
+                                    "handler `{}` returned a body violating its declared response type",
+                                    ctx.label
+                                )),
+                                Some(&errors),
                             ),
-                        );
-                        return Ok(Some((
-                            StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-                            PyReturn::Problem {
-                                status: StatusCode::INTERNAL_SERVER_ERROR,
-                                headers: Vec::new(),
-                                body: problem_json(
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    RESPONSE_PROBLEM_TYPE,
-                                    "Response validation failed",
-                                    Some(format!(
-                                        "handler `{}` returned a body violating its declared response type",
-                                        ctx.label
-                                    )),
-                                    Some(&errors),
-                                ),
-                            },
-                        )));
-                    }
+                        },
+                    )));
                 }
                 let ret = match chan {
                     Chan::Text => PyReturn::Text(value_string(&value)),
@@ -593,10 +593,7 @@ fn contract_body(
 /// else the single declared descriptor (a bare `-> User` body travels
 /// as a `User` whatever status the `Response` object chose), else the
 /// route's single 200-variant.
-fn contract_candidates(
-    contract: &ResponseContract,
-    status: u16,
-) -> Vec<&ResponseVariant> {
+fn contract_candidates(contract: &ResponseContract, status: u16) -> Vec<&ResponseVariant> {
     let exact: Vec<_> = contract
         .variants
         .iter()
@@ -613,12 +610,18 @@ fn contract_candidates(
     if declared.len() == 1 {
         return declared;
     }
-    contract
+    // The "200-ish" fallback applies only when exactly one 200 descriptor
+    // is declared — an ambiguous contract encodes generically instead of
+    // guessing which member the response meant.
+    let two_hundred: Vec<_> = contract
         .variants
         .iter()
         .filter(|v| v.status == Some(StatusCode::OK.as_u16()) && v.desc.is_some())
-        .take(1)
-        .collect()
+        .collect();
+    if two_hundred.len() == 1 {
+        return two_hundred;
+    }
+    Vec::new()
 }
 
 /// How one variant handled the body.
@@ -688,13 +691,10 @@ fn try_variant(
     }
 }
 
-/// The debug output check (§14.2): the wire-shaped `Value` validated
+/// The debug output check (§11.6): the wire-shaped `Value` validated
 /// against the variant's compiled validator in strict mode. Errors mean
 /// the handler's return violates its declared contract.
-fn output_check(
-    variant: &ResponseVariant,
-    value: &Value<'static>,
-) -> Result<(), ValidationErrors> {
+fn output_check(variant: &ResponseVariant, value: &Value<'static>) -> Result<(), ValidationErrors> {
     let Some(validator) = variant.validator.as_ref() else {
         return Ok(());
     };
@@ -704,7 +704,7 @@ fn output_check(
     }
 }
 
-/// `validator.validate_out(value, Response, Strict)` — the §14.2 output
+/// `validator.validate_out(value, Response, Strict)` — the §11.6 output
 /// pass, GIL-free.
 fn validate_response(
     validator: &Arc<Validator>,
@@ -749,8 +749,7 @@ fn contract_violation(
         ctx.logger,
         format!(
             "{}: response failed the declared contract: {}",
-            ctx.label,
-            shape.message,
+            ctx.label, shape.message,
         ),
     );
     Ok(Some((

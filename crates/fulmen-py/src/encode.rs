@@ -7,7 +7,7 @@
 //! A return value that does not fit the declared shape is a contract
 //! violation — a [`ShapeError`] — which the caller logs and answers
 //! `500` (a `problem+json` carrying the error entry under debug mode,
-//! §14.2). A Python access that *raises* (`getattr`, `isoformat`, a
+//! §11.6). A Python access that *raises* (`getattr`, `isoformat`, a
 //! `default_factory`) is a [`EncodeError::Python`] and rides the
 //! ordinary internal-error path like the generic extractor's failures.
 //!
@@ -18,16 +18,15 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use fulmen_schema::desc::{
-    DictDesc, ExtraPolicy, GenericDesc, Kind, Missing, RecordDesc, RecordKind, TypeDesc,
-    UnionDesc,
+    DictDesc, ExtraPolicy, GenericDesc, Kind, Missing, RecordDesc, RecordKind, TypeDesc, UnionDesc,
 };
 use fulmen_schema::errors::{ErrorCode, LocSeg};
 use fulmen_schema::value::Value;
 use pyo3::exceptions::PyAttributeError;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFrozenSet, PyInt,
-    PyList, PySet, PyString, PyTime, PyTuple, PyType,
+    PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFrozenSet, PyInt, PyList,
+    PySet, PyString, PyTime, PyTuple, PyType,
 };
 
 use crate::descriptor::{
@@ -79,11 +78,7 @@ impl ShapeError {
                 }
             }
         }
-        if out.is_empty() {
-            "/".to_owned()
-        } else {
-            out
-        }
+        if out.is_empty() { "/".to_owned() } else { out }
     }
 }
 
@@ -101,7 +96,7 @@ impl EncodeError {
     fn at(self, seg: LocSeg) -> Self {
         match self {
             Self::Shape(s) => Self::Shape(s.at(seg)),
-            other => other,
+            Self::Python(e) => Self::Python(e),
         }
     }
 }
@@ -141,6 +136,84 @@ pub(crate) fn encode<'a>(
             format!("response nesting exceeds {MAX_EXTRACT_DEPTH} levels"),
         ));
     }
+    match &desc.kind {
+        Kind::Null
+        | Kind::Bool
+        | Kind::Int(_)
+        | Kind::Float(_)
+        | Kind::Str(_)
+        | Kind::Email
+        | Kind::Url
+        | Kind::Bytes(_)
+        | Kind::Decimal(_)
+        | Kind::DateTime
+        | Kind::Date
+        | Kind::Time
+        | Kind::TimeDelta
+        | Kind::Uuid
+        | Kind::Ipv4
+        | Kind::Ipv6
+        | Kind::Enum(_)
+        | Kind::Literal(_)
+        | Kind::Any
+        | Kind::Raw => encode_scalar(py, obj, desc, depth),
+        Kind::TypeVar(name) => match scope.get(&**name) {
+            Some(inner) => encode(py, obj, inner, ctx, scope, depth),
+            // A leftover unbound TypeVar is a compile-time bug; encode
+            // generically rather than failing the response.
+            None => extract_value(py, obj, depth + 1).map_err(EncodeError::Python),
+        },
+        Kind::NewType(d) => encode(py, obj, &d.inner, ctx, scope, depth),
+        Kind::Optional(d) => {
+            if obj.is_none() {
+                Ok(Value::Null)
+            } else {
+                encode(py, obj, &d.inner, ctx, scope, depth)
+            }
+        }
+        Kind::Union(d) => encode_union(py, obj, d, ctx, scope, depth),
+        Kind::Generic(d) => encode_generic(py, obj, d, ctx, scope, depth),
+        Kind::List(d) => encode_seq(py, obj, &d.item, ctx, scope, depth, "a sequence"),
+        Kind::TupleVar(d) => encode_seq(py, obj, &d.item, ctx, scope, depth, "a sequence"),
+        Kind::Set(d) | Kind::FrozenSet(d) => {
+            encode_seq(py, obj, &d.item, ctx, scope, depth, "a set/frozenset")
+        }
+        Kind::TupleFixed(d) => {
+            let items = sequence(obj).ok_or_else(|| expected("a tuple", obj))?;
+            if items.len() != d.items.len() {
+                let code = if items.len() < d.items.len() {
+                    ErrorCode::MinLen
+                } else {
+                    ErrorCode::MaxLen
+                };
+                return Err(shape(
+                    code,
+                    format!("expected {} items, got {}", d.items.len(), items.len()),
+                ));
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for (i, (item, item_desc)) in items.iter().zip(d.items.iter()).enumerate() {
+                out.push(
+                    encode(py, item, item_desc, ctx, scope, depth + 1)
+                        .map_err(|e| e.at(index(i)))?,
+                );
+            }
+            Ok(Value::Array(out))
+        }
+        Kind::Dict(d) => encode_dict(py, obj, d, ctx, scope, depth),
+        Kind::Record(rec) => encode_record(py, obj, rec, ctx, scope, depth),
+    }
+}
+
+/// Encode a leaf scalar kind (`Kind::Null` … `Kind::Raw`). `encode`
+/// delegates to this for every kind that does not recurse; the fallback
+/// arm cannot be reached through `encode`.
+fn encode_scalar(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    desc: &TypeDesc,
+    depth: usize,
+) -> Result<Value<'static>, EncodeError> {
     match &desc.kind {
         Kind::Null => {
             if obj.is_none() {
@@ -206,12 +279,7 @@ pub(crate) fn encode<'a>(
                 Err(expected("timedelta", obj))
             }
         }
-        Kind::Uuid => encode_named_str(
-            py,
-            obj,
-            &cached(py, &UUID_CLS, "uuid", "UUID")?,
-            "UUID",
-        ),
+        Kind::Uuid => encode_named_str(py, obj, &cached(py, &UUID_CLS, "uuid", "UUID")?, "UUID"),
         Kind::Ipv4 => encode_named_str(
             py,
             obj,
@@ -232,51 +300,7 @@ pub(crate) fn encode<'a>(
             extract_value(py, obj, depth + 1).map_err(|e| extract_failed(e, obj))
         }
         Kind::Any | Kind::Raw => extract_value(py, obj, depth + 1).map_err(EncodeError::Python),
-        Kind::TypeVar(name) => match scope.get(&**name) {
-            Some(inner) => encode(py, obj, inner, ctx, scope, depth),
-            // A leftover unbound TypeVar is a compile-time bug; encode
-            // generically rather than failing the response.
-            None => extract_value(py, obj, depth + 1).map_err(EncodeError::Python),
-        },
-        Kind::NewType(d) => encode(py, obj, &d.inner, ctx, scope, depth),
-        Kind::Optional(d) => {
-            if obj.is_none() {
-                Ok(Value::Null)
-            } else {
-                encode(py, obj, &d.inner, ctx, scope, depth)
-            }
-        }
-        Kind::Union(d) => encode_union(py, obj, d, ctx, scope, depth),
-        Kind::Generic(d) => encode_generic(py, obj, d, ctx, scope, depth),
-        Kind::List(d) => encode_seq(py, obj, &d.item, ctx, scope, depth, "a sequence"),
-        Kind::TupleVar(d) => encode_seq(py, obj, &d.item, ctx, scope, depth, "a sequence"),
-        Kind::Set(d) | Kind::FrozenSet(d) => {
-            encode_seq(py, obj, &d.item, ctx, scope, depth, "a set/frozenset")
-        }
-        Kind::TupleFixed(d) => {
-            let items = sequence(obj).ok_or_else(|| expected("a tuple", obj))?;
-            if items.len() != d.items.len() {
-                let code = if items.len() < d.items.len() {
-                    ErrorCode::MinLen
-                } else {
-                    ErrorCode::MaxLen
-                };
-                return Err(shape(
-                    code,
-                    format!("expected {} items, got {}", d.items.len(), items.len()),
-                ));
-            }
-            let mut out = Vec::with_capacity(items.len());
-            for (i, (item, item_desc)) in items.iter().zip(d.items.iter()).enumerate() {
-                out.push(
-                    encode(py, item, item_desc, ctx, scope, depth + 1)
-                        .map_err(|e| e.at(index(i)))?,
-                );
-            }
-            Ok(Value::Array(out))
-        }
-        Kind::Dict(d) => encode_dict(py, obj, d, ctx, scope, depth),
-        Kind::Record(rec) => encode_record(py, obj, rec, ctx, scope, depth),
+        _ => Err(expected(&desc.kind.name(), obj)),
     }
 }
 
@@ -458,7 +482,6 @@ fn encode_key<'a>(
                 scalar_key(k)
             }
         }
-        Kind::Literal(_) | Kind::Any | Kind::Raw => scalar_key(k),
         Kind::Optional(d) => {
             if k.is_none() {
                 // `None` keys travel as the empty member — the lax side
@@ -488,7 +511,13 @@ fn encode_key<'a>(
             bind_generic(&mut child, d);
             encode_key(py, k, &d.origin, &child)
         }
-        Kind::Decimal(_) | Kind::Uuid | Kind::Ipv4 | Kind::Ipv6 => scalar_key(k),
+        Kind::Literal(_)
+        | Kind::Any
+        | Kind::Raw
+        | Kind::Decimal(_)
+        | Kind::Uuid
+        | Kind::Ipv4
+        | Kind::Ipv6 => scalar_key(k),
         Kind::DateTime | Kind::Date | Kind::Time => {
             if let Ok(s) = k.cast::<PyString>() {
                 Ok(s.to_str()?.to_owned())
@@ -542,11 +571,7 @@ fn key_seg(k: &Bound<'_, PyAny>) -> LocSeg {
         .cast::<PyString>()
         .ok()
         .and_then(|s| s.to_str().ok().map(ToOwned::to_owned))
-        .or_else(|| {
-            k.str()
-                .and_then(|s| s.to_str().map(ToOwned::to_owned))
-                .ok()
-        });
+        .or_else(|| k.str().and_then(|s| s.to_str().map(ToOwned::to_owned)).ok());
     LocSeg::Key(text.unwrap_or_else(|| "?".to_owned()).into())
 }
 
@@ -698,7 +723,7 @@ fn encode_record<'a>(
             }
         }
     }
-    encode_extras(py, obj, rec, &mapping, depth, &mut pairs)?;
+    encode_extras(py, obj, rec, mapping, depth, &mut pairs)?;
     Ok(Value::Object(pairs))
 }
 
@@ -709,7 +734,7 @@ fn encode_extras(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
     rec: &RecordDesc,
-    mapping: &Option<&Bound<'_, PyDict>>,
+    mapping: Option<&Bound<'_, PyDict>>,
     depth: usize,
     pairs: &mut Vec<(Cow<'static, str>, Value<'static>)>,
 ) -> Result<(), EncodeError> {
@@ -719,30 +744,27 @@ fn encode_extras(
     // The candidate extra keys: the input mapping's keys, or the
     // instance `__dict__` members when the value is an object.
     let mut extras: Vec<(String, Bound<'_, PyAny>)> = Vec::new();
-    match mapping {
-        Some(d) => {
+    if let Some(d) = mapping {
+        for (k, v) in d.iter() {
+            let Ok(name) = k.str() else { continue };
+            let Ok(name) = name.to_str() else { continue };
+            if !declared(rec, name) {
+                extras.push((name.to_owned(), v));
+            }
+        }
+    } else {
+        let state = match obj.getattr("__dict__") {
+            Ok(s) => s,
+            Err(e) if is_attribute_error(obj.py(), &e) => return Ok(()),
+            Err(e) => return Err(EncodeError::Python(e)),
+        };
+        if let Ok(d) = state.cast::<PyDict>() {
             for (k, v) in d.iter() {
                 let Ok(name) = k.str() else { continue };
                 let Ok(name) = name.to_str() else { continue };
-                if !declared(rec, name) {
+                // `_`-prefixed members are object internals, not data.
+                if !name.starts_with('_') && !declared_name(rec, name) {
                     extras.push((name.to_owned(), v));
-                }
-            }
-        }
-        None => {
-            let state = match obj.getattr("__dict__") {
-                Ok(s) => s,
-                Err(e) if is_attribute_error(obj.py(), &e) => return Ok(()),
-                Err(e) => return Err(EncodeError::Python(e)),
-            };
-            if let Ok(d) = state.cast::<PyDict>() {
-                for (k, v) in d.iter() {
-                    let Ok(name) = k.str() else { continue };
-                    let Ok(name) = name.to_str() else { continue };
-                    // `_`-prefixed members are object internals, not data.
-                    if !name.starts_with('_') && !declared_name(rec, name) {
-                        extras.push((name.to_owned(), v));
-                    }
                 }
             }
         }
@@ -835,4 +857,49 @@ fn py_type_name(obj: &Bound<'_, PyAny>) -> String {
     obj.get_type()
         .qualname()
         .map_or_else(|_| "<unknown>".to_owned(), |q| q.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pointer_renders_loc_segments() {
+        let err = ShapeError {
+            loc: vec![
+                LocSeg::Key("user".to_owned().into_boxed_str()),
+                LocSeg::Index(2),
+                LocSeg::Key("tags".to_owned().into_boxed_str()),
+            ],
+            code: ErrorCode::Type,
+            message: "x".to_owned(),
+        };
+        assert_eq!(err.pointer(), "/user/2/tags");
+    }
+
+    #[test]
+    fn pointer_of_empty_loc_is_root() {
+        let err = shape(ErrorCode::Type, "x".to_owned());
+        let EncodeError::Shape(err) = err else {
+            panic!("shape() builds a ShapeError");
+        };
+        assert_eq!(err.pointer(), "/");
+    }
+
+    #[test]
+    fn at_prepends_outermost_first() {
+        let inner = ShapeError {
+            loc: vec![LocSeg::Index(1)],
+            code: ErrorCode::Type,
+            message: "x".to_owned(),
+        };
+        let outer = inner.at(LocSeg::Key("users".to_owned().into_boxed_str()));
+        assert_eq!(outer.pointer(), "/users/1");
+    }
+
+    #[test]
+    fn index_saturates_past_u32() {
+        assert!(matches!(index(usize::MAX), LocSeg::Index(u32::MAX)));
+        assert!(matches!(index(3), LocSeg::Index(3)));
+    }
 }

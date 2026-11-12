@@ -163,18 +163,15 @@ mod tests {
 
     #[test]
     fn containers() {
-        let v = Value::Object(
-            vec![
-                (Cow::Borrowed("name"), Value::str("x")),
-                (
-                    Cow::Borrowed("tags"),
-                    Value::Array(vec![Value::Int(1), Value::Null]),
-                ),
-            ]
-            .into(),
-        );
+        let v = Value::Object(vec![
+            (Cow::Borrowed("name"), Value::str("x")),
+            (
+                Cow::Borrowed("tags"),
+                Value::Array(vec![Value::Int(1), Value::Null]),
+            ),
+        ]);
         assert_eq!(text(&v), "{\"name\":\"x\",\"tags\":[1,null]}");
-        assert_eq!(text(&Value::Array(vec![].into())), "[]");
-        assert_eq!(text(&Value::Object(vec![].into())), "{}");
+        assert_eq!(text(&Value::Array(vec![])), "[]");
+        assert_eq!(text(&Value::Object(vec![])), "{}");
     }
 }

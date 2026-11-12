@@ -22,7 +22,7 @@ use crate::convert::log_message;
 /// startup when uvloop is missing. `gil_batch_size` tunes the sync pool's
 /// GIL batching (§7.5). `reuse_port` binds with
 /// `SO_REUSEPORT` so worker processes can share `host:port` (§7.2, M1.23).
-/// `debug` turns on §14.2 output validation.
+/// `debug` turns on §11.6 output validation.
 ///
 /// # Errors
 /// `StartupError` for declaration problems, `ValueError` for an invalid
@@ -131,7 +131,7 @@ impl Drop for TestServer {
 /// test runner's `SIGINT`. `uvloop` selects the asyncio loop
 /// implementation exactly like [`serve`].
 ///
-/// `debug` turns on §14.2 output validation.
+/// `debug` turns on §11.6 output validation.
 ///
 /// # Errors
 /// `StartupError` for declaration problems, `ValueError` for an invalid

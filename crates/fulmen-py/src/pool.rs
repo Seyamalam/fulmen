@@ -30,7 +30,7 @@ use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
 use crate::convert::{self, CallOutcome, DeferredCall, ErrorTable, JobAnswer, ParamArg, PyCtx};
-use crate::dispatch::ResponseContract;
+use crate::dispatch::{LaneDeps, ResponseContract};
 
 /// One unit of pool work: call `callable` with `args` and answer on
 /// `respond`.
@@ -90,7 +90,7 @@ struct PoolShared {
     /// The app's `@app.on_error` table (§17).
     errors: Arc<ErrorTable>,
     /// `Fulmen(debug=True)`/`serve(debug=…)`: every handler result is
-    /// validated against its declared response descriptor (§14.2).
+    /// validated against its declared response descriptor (§11.6).
     debug: bool,
 }
 
@@ -136,7 +136,7 @@ impl SyncPool {
     /// `logger` and `response_cls` are cached Python objects the workers need
     /// when attached; keeping them here avoids a lookup per job.
     ///
-    /// `debug` turns on §14.2 output validation for every job the pool runs.
+    /// `debug` turns on §11.6 output validation for every job the pool runs.
     ///
     /// # Errors
     /// `io::Error` if a worker thread cannot be spawned.
@@ -145,10 +145,7 @@ impl SyncPool {
         capacity: usize,
         deadline: Duration,
         batch_size: usize,
-        logger: Arc<Py<PyAny>>,
-        response_cls: Arc<Py<PyAny>>,
-        errors: Arc<ErrorTable>,
-        debug: bool,
+        deps: LaneDeps,
     ) -> io::Result<Self> {
         let shared = Arc::new(PoolShared {
             state: Mutex::new(PoolState {
@@ -160,10 +157,10 @@ impl SyncPool {
             capacity,
             deadline,
             batch_size: batch_size.max(1),
-            logger,
-            response_cls,
-            errors,
-            debug,
+            logger: deps.logger,
+            response_cls: deps.response_cls,
+            errors: deps.errors,
+            debug: deps.debug,
         });
         for index in 0..threads {
             let shared = Arc::clone(&shared);

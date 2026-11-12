@@ -32,7 +32,7 @@ use tokio::sync::oneshot;
 
 use crate::app::StartupError;
 use crate::convert::{self, CallOutcome, ErrorTable, InvokeError, JobAnswer, ParamArg, PyCtx};
-use crate::dispatch::ResponseContract;
+use crate::dispatch::{LaneDeps, ResponseContract};
 
 /// How long [`AsyncLoop::start`] waits for the loop thread to report ready.
 const LOOP_READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -199,7 +199,7 @@ struct AsyncShared {
     /// The app's `@app.on_error` table (§17).
     errors: Arc<ErrorTable>,
     /// `Fulmen(debug=True)`/`serve(debug=…)`: every handler result is
-    /// validated against its declared response descriptor (§14.2).
+    /// validated against its declared response descriptor (§11.6).
     debug: bool,
 }
 
@@ -276,10 +276,7 @@ impl AsyncLoop {
         loop_impl: LoopImpl,
         capacity: usize,
         deadline: Duration,
-        logger: Arc<Py<PyAny>>,
-        response_cls: Arc<Py<PyAny>>,
-        errors: Arc<ErrorTable>,
-        debug: bool,
+        deps: LaneDeps,
     ) -> PyResult<Self> {
         let shared = Arc::new(AsyncShared {
             queue: Mutex::new(AsyncQueue {
@@ -291,10 +288,10 @@ impl AsyncLoop {
             next_id: AtomicU64::new(0),
             capacity,
             deadline,
-            logger,
-            response_cls,
-            errors,
-            debug,
+            logger: deps.logger,
+            response_cls: deps.response_cls,
+            errors: deps.errors,
+            debug: deps.debug,
         });
         let ready = Arc::new(Ready {
             slot: Mutex::new(None),

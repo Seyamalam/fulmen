@@ -55,7 +55,7 @@ _RouteSpec = tuple[
 class Fulmen:
     """A Fulmen application: routes and error handlers, then `run()`.
 
-    `debug=True` turns on §14.2 output validation: every handler return is
+    `debug=True` turns on §11.6 output validation: every handler return is
     checked against its declared response type, and a violation answers
     `500 application/problem+json` with the validation errors (the handler
     identity is logged). Serving flags (`run(debug=…)`, `--debug`) enable
@@ -146,7 +146,7 @@ class Fulmen:
         `SO_REUSEPORT` on Linux and macOS; other platforms refuse it and
         stay single-process (DESIGN.md §7.2, decision D15).
 
-        `debug=True` turns on §14.2 output validation for this serving —
+        `debug=True` turns on §11.6 output validation for this serving —
         every handler return is checked against its declared response type
         and violations answer `500 application/problem+json`.
 
