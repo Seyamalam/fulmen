@@ -59,6 +59,7 @@ from fulmen.params import (
     Request,
     UploadFile,
 )
+from fulmen.plugins import CheckRule, Plugin, PluginContext, PluginHandle
 from fulmen.request import Headers
 from fulmen.responses import (
     Accepted,
@@ -99,6 +100,7 @@ __all__ = [
     "BadGateway",
     "BadRequest",
     "Body",
+    "CheckRule",
     "Conflict",
     "Cookie",
     "Created",
@@ -136,6 +138,9 @@ __all__ = [
     "Path",
     "Pattern",
     "PayloadTooLarge",
+    "Plugin",
+    "PluginContext",
+    "PluginHandle",
     "PreconditionFailed",
     "PydanticValidator",
     "Query",

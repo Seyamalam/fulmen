@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Unpack
 
 from fulmen import _typing
 from fulmen import openapi as _openapi
+from fulmen import plugins as _plugins
 from fulmen._fulmen import NativeApp, StartupError, compile_descriptor
 from fulmen._fulmen import serve as _serve
 from fulmen.constraints import UNSET
@@ -118,6 +119,7 @@ class Fulmen:
         "_on_shutdown",
         "_on_startup",
         "_openapi_url",
+        "_plugins",
         "_prefix",
         "_sealed",
     )
@@ -153,6 +155,7 @@ class Fulmen:
         self._on_startup: list[tuple[_Handler, bool]] = []
         self._on_shutdown: list[tuple[_Handler, bool]] = []
         self._mounted: list[Fulmen] = []
+        self._plugins: list[tuple[object, _plugins.PluginHandle[Any], _plugins.PluginMeta]] = []
         self._prefix = prefix
         self._sealed = False
         self._api_info = _openapi.ApiInfo(
@@ -179,6 +182,7 @@ class Fulmen:
         (`tags`, `summary`, `description`, `operation_id`, `deprecated`,
         `include_in_schema`) — they never change dispatch.
         """
+        self._check_open()
         meta = _openapi.operation_meta(options)
 
         def decorator(handler: _Handler) -> _Handler:
@@ -368,16 +372,55 @@ class Fulmen:
         self._mounted.append(app)
         return app
 
+    def use(
+        self,
+        plugin: _plugins.PluginT,
+        config: Mapping[str, Any] | None = None,
+        /,
+        **extra: Any,
+    ) -> _plugins.PluginHandle[_plugins.PluginT]:
+        """Register `plugin` and return its typed handle (DESIGN.md §13).
+
+        `use()` does not run `setup()`: every `use()` in the app tree is
+        resolved into a dependency order at compile (`requires`, §13.2),
+        and each `plugin.setup(ctx)` runs then with a `PluginContext` —
+        `use()` order is not execution order. `handle.state` is whatever
+        `setup()` returned; attribute lookups it doesn't define fall
+        through to the plugin object, so `Annotated[auth.Claims, auth]`
+        works at decoration time (§5.6).
+
+        `config` plus any keyword arguments form the plugin's
+        configuration mapping, delivered as `ctx.config` — the seam
+        `Settings` sections (§20, M3.22) will feed typed slices into.
+
+        `group.use(plugin)` scopes the plugin's contributions to that
+        group and its children (§13.3); a plugin declaring
+        `scope = "app"` refuses group use at compile.
+        """
+        self._check_open()
+        meta = _plugins.plugin_meta(plugin)
+        merged: dict[str, Any] = {**dict(config or {}), **extra}
+        handle = _plugins.PluginHandle(plugin, merged)
+        self._plugins.append((plugin, handle, meta))
+        return handle
+
     def _walk(
-        self, prefix: str = "", scopes: tuple[Fulmen, ...] = ()
+        self,
+        prefix: str = "",
+        scopes: tuple[Fulmen, ...] = (),
+        extra_mounts: dict[int, list[Fulmen]] | None = None,
     ) -> Iterator[tuple[Fulmen, str, tuple[Fulmen, ...]]]:
         """Yield `(app, full_prefix, group_chain)` for this app and every
         mounted descendant — `group_chain` is the mounted-app chain a
-        route belongs to, outermost first."""
+        route belongs to, outermost first. `extra_mounts` grafts
+        plugin-mounted groups onto their owner's children (§13.1)."""
         base = _join_paths(prefix, self._prefix)
         yield self, base, scopes
-        for child in self._mounted:
-            yield from child._walk(base, (*scopes, child))
+        children = list(self._mounted)
+        if extra_mounts is not None:
+            children.extend(extra_mounts.get(id(self), ()))
+        for child in children:
+            yield from child._walk(base, (*scopes, child), extra_mounts)
 
     def run(
         self,
@@ -432,6 +475,86 @@ class Fulmen:
             gil_batch_size=gil_batch_size,
         )
 
+    def _prepare_plugins(self) -> _plugins.PluginPlan:
+        """Resolve every `use()` in the app tree and run each `setup()`
+        (§6.4.2): the first half of compilation, shared by
+        `_compile_native`, `openapi()` and `fulmen <cmd>` dispatch.
+
+        Resolution is global — `requires`/`conflicts` bind plugin names
+        anywhere in the tree — and deterministic: topological by
+        `requires`, ties in `use()` order (§13.2). Groups a plugin mounts
+        (`ctx.mount`) join the walk, so `use()`s nested under
+        plugin-mounted groups resolve in a later wave: their plugins
+        always run after the plugin that mounted their group.
+        """
+        plan = _plugins.PluginPlan()
+        seen: set[int] = set()
+        uses: list[_plugins.PluginUse] = []
+        done: set[int] = set()
+        setup_problems: list[str] = []
+        # Plugin mounts surface more `use()`s, so resolve+setup repeats
+        # until a wave discovers nothing new (depth-capped).
+        for _wave in range(16):
+            discovered = False
+            for app, _base, _chain in self._walk(extra_mounts=plan.extra_mounts):
+                if id(app) in seen:
+                    continue
+                seen.add(id(app))
+                discovered = True
+                uses.extend(
+                    _plugins.PluginUse(owner=app, plugin=plugin, handle=handle, meta=meta)
+                    for plugin, handle, meta in app._plugins
+                )
+            if not uses:
+                return plan
+            order, _pending = _plugins.resolve_uses(uses)
+            mounted_new = False
+            for index in order:
+                if index in done:
+                    continue
+                done.add(index)
+                use = uses[index]
+                if use.meta.app_only and use.owner is not self:
+                    setup_problems.append(
+                        f'plugin `{use.meta.name}` declares scope="app" '
+                        "and cannot be used on a route group"
+                    )
+                    continue
+                ctx = _plugins.PluginContext(
+                    app=use.owner, plugin_name=use.meta.name, config=use.handle.config
+                )
+                try:
+                    state = use.plugin.setup(ctx)
+                except Exception as exc:  # noqa: BLE001 -- setup failures aggregate as startup problems (§14.1)
+                    setup_problems.append(f"plugin `{use.meta.name}`: setup() failed: {exc}")
+                    continue
+                ctx.close()
+                use.handle.settle(state)
+                plan.entries.append((use, ctx))
+                for mounted in ctx.staged.mounted:
+                    plan.extra_mounts.setdefault(id(use.owner), []).append(mounted)
+                    mounted_new = True
+            if not discovered and not mounted_new:
+                break
+        else:
+            setup_problems.append("plugin mount nesting exceeds the supported depth (16)")
+
+        # Validation over the complete use set — a `requires` missing in
+        # an earlier wave may have healed as plugin-mounted groups
+        # surfaced, so resolution runs last, once.
+        _order, resolution_problems = _plugins.resolve_uses(uses)
+        plan.problems.extend(resolution_problems)
+        plan.problems.extend(setup_problems)
+        plan.problems.extend(_plugins.order_integrity(plan.entries))
+        plan.finish()
+        return plan
+
+    def _plugin_cli_commands(self) -> tuple[dict[str, _plugins.CliHandler], list[str]]:
+        """The `fulmen <cmd>` dispatch table: every plugin-registered
+        command plus the aggregated resolution problems (§13.1, §24)."""
+        plan = self._prepare_plugins()
+        return dict(plan.cli_commands), list(plan.problems)
+
     def openapi(self) -> dict[str, Any]:
         """The OpenAPI 3.1 document for the declared routes (§11.3, §23.2).
 
@@ -439,37 +562,61 @@ class Fulmen:
         raises `StartupError` here too. The returned dict is freshly
         built each call; serving renders it once at startup instead.
         """
+        plan = self._prepare_plugins()
+        walked = list(self._walk(extra_mounts=plan.extra_mounts))
         # Group scopes only matter to the native declaration; the
         # document sees the joined paths either way.
-        specs, problems = self._route_specs({id(app): 0 for app, _b, _c in self._walk()})
-        if problems:
-            raise _startup_error(problems)
-        return _openapi.generate(
+        specs, problems = self._route_specs({id(app): 0 for app, _b, _c in walked}, plan, walked)
+        all_problems = plan.problems + problems
+        if all_problems:
+            raise _startup_error(all_problems)
+        document = _openapi.generate(
             self._api_info, [_route_entry(spec, meta) for spec, meta, _layers in specs]
         )
+        component_problems = _plugins.merge_components(document, plan.components)
+        if component_problems:
+            raise _startup_error(component_problems)
+        return document
 
     def _compile_native(self) -> NativeApp:
         """Inspect every recorded handler and build the native declaration.
 
         Python-side problems (unknown parameter, bad annotation, missing
-        path-param binding, uninspectable signature) are aggregated and
-        raised as one `StartupError` in the same format Rust produces for
-        core compile errors. Compiling seals the declarations (§14.8).
+        path-param binding, uninspectable signature, plugin resolution
+        failures) are aggregated and raised as one `StartupError` in the
+        same format Rust produces for core compile errors. Compiling
+        seals the declarations (§14.8).
         """
         self._sealed = True
+        plan = self._prepare_plugins()
+        walked = list(self._walk(extra_mounts=plan.extra_mounts))
+        # §14.8: every app in the tree seals — mounted groups included —
+        # so no registration path accepts declarations after compile.
+        for app, _base, _chain in walked:
+            app._sealed = True
         native = NativeApp(debug=self._debug)
         # One group scope per mounted application; the app's own
         # registrations stay in the application scope (`0`).
         scope_ids: dict[int, int] = {
-            id(app): native.add_scope()
-            for walked, _base, _chain in self._walk()
-            for app in (walked,)
-            if app is not self
+            id(app): native.add_scope() for app, _b, _c in walked if app is not self
         }
-        specs, problems = self._route_specs(scope_ids)
+        specs, problems = self._route_specs(scope_ids, plan, walked)
+        problems = plan.problems + problems
         for spec, _meta, layers in specs:
             native.add_route((*spec, layers))
-        for app, _base, _chain in self._walk():
+        # §8/§13.2: plugin contributions register ahead of app hooks so
+        # plugin hooks precede app hooks in each phase's (priority, seq)
+        # ordering; each plugin's registrations take its owner's scope.
+        for _use, ctx in plan.entries:
+            staged = ctx.staged
+            scope = 0 if staged.owner is self else scope_ids[id(staged.owner)]
+            for phase, hook, is_async, name, priority in staged.hooks:
+                native.add_hook(phase, hook, is_async, name, priority, scope)
+            for exc_class, handler, is_async in staged.error_handlers:
+                native.add_error_handler(exc_class, handler, is_async, scope)
+            for kind, hook, is_async in staged.lifecycle:
+                native.add_lifecycle_hook(kind, hook, is_async)
+        for app, _base, _chain in walked:
             scope = 0 if app is self else scope_ids[id(app)]
             for phase, hook, is_async, name, priority in app._hooks:
                 native.add_hook(phase, hook, is_async, name, priority, scope)
@@ -481,19 +628,29 @@ class Fulmen:
                 native.add_lifecycle_hook("shutdown", hook, is_async)
         if problems:
             raise _startup_error(problems)
-        self._serve_docs(native, [(spec, meta) for spec, meta, _layers in specs])
+        self._serve_docs(native, [(spec, meta) for spec, meta, _layers in specs], plan)
         return native
 
     def _route_specs(
-        self, scope_ids: dict[int, int]
+        self,
+        scope_ids: dict[int, int],
+        plan: _plugins.PluginPlan | None = None,
+        walked: list[tuple[Fulmen, str, tuple[Fulmen, ...]]] | None = None,
     ) -> tuple[list[tuple[_RouteSpec, _openapi.OperationMeta, list[int]]], list[str]]:
         """Every declaration inspected into its `_RouteSpec` + doc meta +
-        group layers, plus the aggregated problem list."""
+        group layers, plus the aggregated problem list. Plugin-declared
+        routes join after their owner app's own declarations."""
+        if walked is None:
+            walked = list(self._walk(extra_mounts=plan.extra_mounts if plan else None))
+        plugin_routes = plan.route_decls() if plan is not None else {}
         specs: list[tuple[_RouteSpec, _openapi.OperationMeta, list[int]]] = []
         problems: list[str] = []
-        for app, base, chain in self._walk():
+        for app, base, chain in walked:
             layers = [scope_ids[id(group)] for group in chain]
-            for method, path, handler, meta in app._declared:
+            for method, path, handler, meta in (
+                *app._declared,
+                *plugin_routes.get(id(app), ()),
+            ):
                 spec = _inspect_handler(method, _join_paths(base, path), handler, problems)
                 if spec is not None:
                     specs.append((spec, meta, layers))
@@ -503,6 +660,7 @@ class Fulmen:
         self,
         native: NativeApp,
         specs: list[tuple[_RouteSpec, _openapi.OperationMeta]],
+        plan: _plugins.PluginPlan,
     ) -> None:
         """Mount `GET openapi_url`, `GET docs_url` and the UI assets, each
         serving a body rendered once here — the spec trees are frozen at
@@ -511,13 +669,13 @@ class Fulmen:
         if self._openapi_url is None:
             return
         entries = [_route_entry(spec, meta) for spec, meta in specs]
-        document = _openapi.render(_openapi.generate(self._api_info, entries))
-        taken = {
-            (method, _join_paths(base, path))
-            for app, base, _chain in self._walk()
-            for method, path, _handler, _meta in app._declared
-        }
-        _add_static_route(native, taken, self._openapi_url, document, "application/json")
+        document = _openapi.generate(self._api_info, entries)
+        component_problems = _plugins.merge_components(document, plan.components)
+        if component_problems:
+            raise _startup_error(component_problems)
+        document_bytes = _openapi.render(document)
+        taken = {(spec[0], spec[1]) for spec, _meta in specs}
+        _add_static_route(native, taken, self._openapi_url, document_bytes, "application/json")
         if self._docs_url is None:
             return
         page = _openapi.docs_html(
