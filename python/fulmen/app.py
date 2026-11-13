@@ -1001,24 +1001,24 @@ def _inspect_handler(
                     problems.append(
                         f"{label}: settings parameter `{name}` cannot be positional-only"
                     )
-                    return None
+                    return None, None
                 if parameter.default is not inspect.Parameter.empty:
                     problems.append(
                         f"{label}: settings parameter `{name}` cannot declare a "
                         "default — the app injects the resolved instance"
                     )
-                    return None
+                    return None, None
                 if typing.get_origin(hint) is typing.Annotated:
                     problems.append(
                         f"{label}: settings parameter `{name}` takes no `Annotated` "
                         "source marker — a Settings type is injected, not extracted"
                     )
-                    return None
+                    return None, None
                 try:
                     injected[name] = resolve_settings(base_hint)
                 except Exception as exc:  # noqa: BLE001 -- settings load failures are startup problems
                     problems.append(str(exc))
-                    return None
+                    return None, None
                 continue
             default = UNSET if parameter.default is inspect.Parameter.empty else parameter.default
             infos.append(
