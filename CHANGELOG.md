@@ -10,6 +10,17 @@ exists. Move the `Unreleased` entries under the new version heading first.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-13
+
+Milestone M3 — "extensibility". The app's behavior around the handler is
+now fully declarable: lifecycle hooks in eight phases, typed plugins with
+dependency ordering, scoped dependency injection, adapter interfaces for
+infrastructure seams, typed `Settings`, in-process test clients, and a
+native plugin SDK for extensions that must stay off the Python path.
+Exit criteria in `benches/results/0.3.0.md`: native-plugin routes hold
+the one-crossing invariant and measured hook overhead is ~17–191 ns —
+two orders of magnitude under the 1 µs bar.
+
 ### Added
 
 - Lifecycle hooks (M3.1–M3.4 + M3.9, DESIGN.md §8): the eight hookable
