@@ -28,6 +28,7 @@ mod encode;
 mod extract;
 mod hooks;
 mod json;
+mod plugins;
 mod pool;
 mod serve;
 
@@ -50,6 +51,10 @@ mod _fulmen {
         m.add_function(pyo3::wrap_pyfunction!(crate::serve::serve_for_test, m)?)?;
         m.add_function(pyo3::wrap_pyfunction!(
             crate::descriptor::compile_descriptor,
+            m
+        )?)?;
+        m.add_function(pyo3::wrap_pyfunction!(
+            crate::plugins::resolve_plugin_order,
             m
         )?)?;
         Ok(())

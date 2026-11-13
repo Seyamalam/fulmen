@@ -43,6 +43,16 @@ def compile_descriptor(
     spec: dict[str, Any],
     callbacks: list[Callable[..., Any]] | None = None,
 ) -> Descriptor: ...
+def resolve_plugin_order(
+    decls: list[tuple[str, list[str], list[str]]],
+) -> tuple[list[int], list[str]]:
+    """Resolve `use()` registrations into a plugin setup order (§13.2).
+
+    `decls[i]` is `(name, requires, conflicts)` for the i-th registered
+    plugin. Returns `(order, problems)`: `order` holds declaration
+    indices — requirements first, ties in registration order — and
+    `problems` aggregates every resolution error (missing requirements,
+    conflicts, duplicate names, cycles) as message strings."""
 
 class NativeApp:
     """Recorded route declarations, consumed by `serve`/`serve_for_test`.
