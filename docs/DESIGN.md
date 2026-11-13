@@ -851,27 +851,65 @@ metrics plugin).
 
 A third-party wheel can ship Rust code that runs in the native pipeline
 without the GIL. Third-party plugins are compiled separately from Fulmen, so
-the boundary is a C ABI:
+the boundary is a C ABI owned by `crates/fulmen-plugin-sdk`:
 
 ```rust
 #[repr(C)]
-pub struct FulmenPluginV1 {
-    pub abi_version: u32,                       // must equal FULMEN_PLUGIN_ABI (1)
-    pub name: *const c_char,
-    pub create: extern "C" fn(config_json: *const u8, len: usize) -> *mut c_void,
-    pub on_request: Option<extern "C" fn(state: *mut c_void, req: *const RawRequest, out: *mut Decision) -> i32>,
-    pub on_response: Option<extern "C" fn(state: *mut c_void, res: *mut RawResponse) -> i32>,
-    pub destroy: extern "C" fn(state: *mut c_void),
+pub struct FulmenPluginDescriptorV1 {
+    pub abi_version: u32,              // must equal FULMEN_PLUGIN_ABI (1)
+    pub struct_size: u32,              // size_of::<Self>() — guards layout drift
+    pub name: FfiStr,                  // (ptr, len) borrowed UTF-8, plugin's 'static
+    pub version: FfiStr,
+    pub create: FfiCreateFn,           // config FfiStr, err *mut FfiBuf -> *mut c_void
+    pub destroy: FfiDestroyFn,         // state *mut c_void -> ()
+    pub hooks: [Option<FfiHookFn>; 8], // per §8 phase, index-ordered; None = not hooked
 }
 ```
 
-- The table is passed to Fulmen inside a `PyCapsule` named `fulmen.plugin.v1`.
-- `fulmen-plugin-sdk` wraps this in a safe trait and a `export_plugin!`
-  macro, so plugin authors write no `unsafe`. The SDK is the one crate besides
-  `fulmen-py` that needs `unsafe` (listed in `UNSAFE_ALLOWED` when created).
-- Fulmen checks `abi_version` at load time and refuses mismatches with a clear message.
-- A plugin that panics is caught at the boundary (`catch_unwind` in the SDK);
-  the request gets a 500 and the plugin is reported in logs.
+Each hook is
+`unsafe extern "C" fn(state, cx: *const FfiHookCxV1, out: *mut FfiResponseView, err: *mut FfiBuf) -> i32`
+— `0` continues, `1` answers with the response written into `out`, a
+negative code reports failure with the message in `err`. `FfiHookCxV1`
+carries the phase index, borrowed `method`/`path`/`query`/`body` slices,
+the peer address, a read-only `FfiHeaders` view over the request headers,
+and — for the post-handler phases — a mutable `FfiResponseView` over the
+in-flight response. `FfiHeaders`/`FfiResponseView` are opaque host
+contexts plus function tables (`count`/`at`/`get`/`set`/`remove`, status
+and body ops), so headers are never materialized on the read path.
+
+- The descriptor pointer reaches Fulmen in a `PyCapsule` named
+  `fulmen.plugin.v1`. `NativePlugin(spec)` loads it: a shared-library path
+  exports `fulmen_plugin_v1() -> *const FulmenPluginDescriptorV1` (the
+  symbol `export_plugin!` publishes); an importable module exposes
+  `get_fulmen_plugin() -> capsule` (or a `fulmen_plugin` attribute).
+- `fulmen-plugin-sdk` wraps the table in a safe `FulmenPlugin` trait —
+  `Send + Sync`, one `&self` method per §8 phase since hooks run on any
+  dispatch thread, including free-threaded builds — plus borrowed
+  `RequestView`/`ResponseView` types and `export_plugin!`, which emits the
+  entry point and panic-catching trampolines so plugin authors write no
+  `unsafe`. The SDK is the only crate added to `UNSAFE_ALLOWED` (M3.17);
+  `fulmen-py` stays unsafe-free — it hands the capsule's `NonNull`
+  pointer to `host::LoadedPlugin::load` and every dereference lives inside
+  the SDK.
+- Strings and header values cross as borrowed `(ptr, len)` slices valid
+  for the call only; ownership never crosses the boundary. The host
+  copies a `Respond` status/headers/body through `out`'s ops before the
+  call returns; `create`'s state pointer is the one owned hand-off —
+  `destroy` runs exactly once on drop, never for an instance `create`
+  didn't return.
+- Every cross-ABI call is wrapped in `catch_unwind` — in the generated
+  trampolines (plugin side) and again in `run_hook` (host side). A
+  panicking hook becomes a 500 problem response and a log line; a
+  panicking `setup` becomes a startup error.
+- `app.use(NativePlugin(spec), config)` serialises `config` as the
+  plugin's `config_json`; its hooks register under `PRIORITY_USER` (or the
+  plugin's `priority` kwarg) in the user's scope, named
+  `"{plugin}:{phase}"`. They run inline on the dispatch thread — zero
+  Python crossings — so a route whose only hook is native still reports
+  `cost: 1` under `fulmen routes --cost`.
+- Fulmen checks `abi_version` at load and refuses mismatches with an
+  `expected N, found M` startup error; `struct_size` guards reading
+  fields a future descriptor might append.
 - The ABI is marked unstable until Fulmen 1.0.
 
 ### 13.5 Built-in plugins
