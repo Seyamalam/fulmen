@@ -45,6 +45,10 @@ def plugin_lib() -> Path:
     for name in _LIB_NAMES:
         candidate = _ROOT / "target" / "debug" / name
         if candidate.exists():
+            try:
+                ctypes.CDLL(str(candidate))
+            except OSError as exc:  # e.g. x86_64 interpreter vs arm64 dylib
+                pytest.skip(f"interpreter cannot load the example plugin: {exc}")
             return candidate
     pytest.fail(f"example plugin library missing after build (tried {_LIB_NAMES})")
 
