@@ -319,7 +319,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fulmen-bench"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "fulmen-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "http",
  "matchit",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "fulmen-example-plugin"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fulmen-plugin-sdk",
  "serde_json",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "fulmen-plugin-sdk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "http",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "fulmen-py"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "fulmen-core",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "fulmen-schema"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proptest",
  "regex",
@@ -383,11 +383,11 @@ dependencies = [
 
 [[package]]
 name = "fulmen-security"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "fulmen-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "http",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "fulmen-testkit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fulmen-core",
 ]

@@ -88,7 +88,7 @@ def bump(version: str) -> None:
     text = manifest.read_text()
     text = text.replace(f'version = "{old}"\nedition', f'version = "{version}"\nedition', 1)
     text = re.sub(
-        rf'(fulmen-\w+ = \{{ path = "crates/fulmen-\w+", version = )"{re.escape(old)}"',
+        rf'(fulmen-[\w-]+ = \{{ path = "[^"]+/[^"]+", version = )"{re.escape(old)}"',
         rf'\1"{version}"',
         text,
     )
