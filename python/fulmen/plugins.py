@@ -84,6 +84,33 @@ _COMPONENT_SECTIONS = frozenset(
 _CHECK_CODE = re.compile(r"FUL-[A-Z0-9][A-Z0-9_]*-\d{3}\Z")
 _CLI_COMMAND = re.compile(r"[a-z][a-z0-9-]*\Z")
 
+# The §14.3 decoder bounds a `limits` declaration may carry (§14.8):
+# request-time fields only — `max_desc_depth` is compile-time and never
+# declared here. The native side checks the tightening direction.
+LIMIT_FIELDS = frozenset({"max_depth", "max_items", "max_str_bytes"})
+
+# The §14.3 defaults an undeclared field carries for the tightening
+# check: `max_str_bytes` is unbounded by default, mirrored as usize::MAX.
+_DEFAULT_LIMITS = {"max_depth": 64, "max_items": 100_000, "max_str_bytes": 2**64 - 1}
+
+
+def _validate_limits(limits: Mapping[str, object], *, owner: str) -> dict[str, int]:
+    """Validate a declared limits mapping into a plain int dict.
+
+    Unknown fields and non-positive values raise `ValueError` eagerly;
+    the app↔plugin tightening check runs at compile (§14.8)."""
+    out: dict[str, int] = {}
+    for field, value in limits.items():
+        if field not in LIMIT_FIELDS:
+            names = ", ".join(sorted(LIMIT_FIELDS))
+            raise ValueError(
+                f"{owner} declares unknown limit {field!r} (expected one of: {names})"
+            )
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{owner} limit `{field}` must be a positive integer, got {value!r}")
+        out[field] = value
+    return out
+
 
 @runtime_checkable
 class Plugin(Protocol):
@@ -212,6 +239,7 @@ class PluginContext:
         "_error_handlers",
         "_hooks",
         "_lifecycle",
+        "_limits",
         "_mounted",
         "_native",
         "_plugin_name",
@@ -228,6 +256,7 @@ class PluginContext:
         self._hooks: list[tuple[str, _Handler, bool, str, int]] = []
         self._error_handlers: list[tuple[type[BaseException], _Handler, bool]] = []
         self._lifecycle: list[tuple[str, _Handler, bool]] = []
+        self._limits: dict[str, int] = {}
         self._mounted: list[Fulmen] = []
         self._native: list[tuple[object, int | None, object]] = []
         self._providers: list[object] = []
@@ -277,6 +306,7 @@ class PluginContext:
             components=self._components,
             cli=self._cli,
             check_rules=self._check_rules,
+            limits=self._limits,
         )
 
     # -- lifecycle hooks (§8) -------------------------------------------------
@@ -440,6 +470,43 @@ class PluginContext:
             return handler
 
         return decorator
+
+    # -- request limits (§14.3/§14.8) --------------------------------------------
+    def limits(
+        self,
+        *,
+        max_depth: int | None = None,
+        max_items: int | None = None,
+        max_str_bytes: int | None = None,
+    ) -> None:
+        """Declare tighter request-parsing limits for the plugin's scope (§14.8).
+
+        A plugin can only make the app's limits stricter, never looser:
+        every declared bound is checked against the app's at compile, and
+        a looser field is a startup error naming the field, the plugin
+        and both values. The tightened set applies to every route in the
+        scope the plugin was `use()`d on — the whole app for `app.use()`,
+        the group and its children for `group.use()`; routes outside the
+        scope keep the app's limits.
+
+        Fields: `max_depth` (JSON/document nesting), `max_items`
+        (array/object entries) and `max_str_bytes` (text/bytes value
+        length). Repeated calls merge by keeping the stricter value per
+        field."""
+        self._ensure_open()
+        declared = {
+            field: value
+            for field, value in (
+                ("max_depth", max_depth),
+                ("max_items", max_items),
+                ("max_str_bytes", max_str_bytes),
+            )
+            if value is not None
+        }
+        for field, value in _validate_limits(
+            declared, owner=f"plugin `{self._plugin_name}`"
+        ).items():
+            self._limits[field] = min(value, self._limits.get(field, value))
 
     # -- native plugins (§13.4, M3.16) -------------------------------------------
 
@@ -687,6 +754,8 @@ class StagedContributions:
     components: dict[str, dict[str, Any]]
     cli: dict[str, CliHandler]
     check_rules: list[CheckRule]
+    #: §14.8: declared request-limit tightening for the plugin's scope.
+    limits: dict[str, int]
 
 
 # -- plan machinery (used by `Fulmen._prepare_plugins`) ---------------------------

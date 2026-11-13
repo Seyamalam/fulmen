@@ -228,6 +228,10 @@ pub(crate) struct HandlerEntry {
     /// The handler declares a `request: Request` parameter — the shared
     /// request object must be materialized for it.
     pub(crate) wants_request: bool,
+    /// The request-parsing limits extraction runs under (§14.3/§14.8):
+    /// the app's declared bounds tightened by every plugin limit scoped
+    /// to this route.
+    pub(crate) limits: fulmen_schema::Limits,
 }
 
 /// One job's flags — bundled so `submit`/`enqueue` stay readable as the
@@ -417,7 +421,13 @@ impl AppInner {
         if entry.wants_request {
             ensure_snap(&mut snap, &request);
         }
-        let args = match extract::extract_args(&hit, &entry.call_spec, &request, snap.as_ref()) {
+        let args = match extract::extract_args(
+            &hit,
+            &entry.call_spec,
+            &request,
+            snap.as_ref(),
+            &entry.limits,
+        ) {
             extract::Extracted::Call(args) => args,
             extract::Extracted::Reply(response) => {
                 return self

@@ -124,6 +124,24 @@ class NativeApp:
         `config_json`; `keep` is held for the app's lifetime so the
         plugin's code stays mapped. Raises `StartupError` on ABI mismatch
         or a failed/panicking plugin `setup`."""
+    def set_limits(
+        self,
+        max_depth: int | None = None,
+        max_items: int | None = None,
+        max_str_bytes: int | None = None,
+    ) -> None:
+        """Record the app's request limits (`Fulmen(limits=…)`, §14.3);
+        `None` keeps the default for that field."""
+    def add_scope_limits(
+        self,
+        scope: int,
+        plugin: str,
+        max_depth: int | None = None,
+        max_items: int | None = None,
+        max_str_bytes: int | None = None,
+    ) -> None:
+        """Record one plugin's limit declaration for `scope` (§14.8);
+        compile rejects any field looser than the app's."""
     def describe_routes(
         self,
     ) -> list[tuple[str, str, str, list[tuple[str, str, str]], list[str], int]]:
