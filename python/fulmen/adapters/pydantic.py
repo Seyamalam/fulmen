@@ -299,6 +299,10 @@ def _convert_metadata_item(
     for attr in _CONS_ATTRS:
         value = getattr(item, attr, None)
         if value is not None:
+            if attr == "pattern" and not isinstance(value, str):
+                # `Field(pattern=re.compile(...))` — the wire needs the
+                # source text, same as the `Annotated` path unwraps it.
+                value = getattr(value, "pattern", value)
             cons[attr] = value
             consumed = True
     for attr, transform in _TRANSFORM_ATTRS:
@@ -421,7 +425,10 @@ def _rewrite_hint(hint: Any, where: str) -> Any:
         converted: list[Any] = []
         for marker in markers:
             converted.extend(_convert_annotated_marker(marker, where))
-        return Annotated[_rewrite_hint(base, where), *converted]
+        rewritten = _rewrite_hint(base, where)
+        # A noop-only marker list (`Annotated[int, Strict()]`) leaves nothing
+        # to wrap — `Annotated[int]` alone is a TypeError.
+        return Annotated[rewritten, *converted] if converted else rewritten
     origin = get_origin(hint)
     if origin is None or origin is typing.Literal:
         return hint

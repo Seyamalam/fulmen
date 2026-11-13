@@ -460,3 +460,25 @@ class TestMemoryImplEdges:
             await store.ack(job.id)
 
         run(check())
+
+
+# -- memory store internals: bounded maps -------------------------------------
+
+
+class TestRateLimitEviction:
+    """`_insert_bounded` keeps `_tats` under `max_keys` — expired entries
+    are swept first, then the earliest-TAT victim goes."""
+
+    def test_expired_entries_swept_first(self) -> None:
+        store = MemoryRateLimitStore(max_keys=1)
+        store._tats["old"] = 0  # long expired — the sweep removes it
+        run(store.acquire("new", 1, Rate(count=1, per=timedelta(seconds=1))))
+        assert "new" in store._tats
+        assert "old" not in store._tats
+
+    def test_lru_victim_evicted_when_full(self) -> None:
+        store = MemoryRateLimitStore(max_keys=1)
+        store._tats["old"] = store._tats.get("x", 0) or (__import__("time").monotonic_ns() + 10**12)
+        run(store.acquire("new", 1, Rate(count=1, per=timedelta(seconds=1))))
+        assert "new" in store._tats
+        assert "old" not in store._tats

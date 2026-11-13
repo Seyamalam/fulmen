@@ -71,3 +71,107 @@ def test_cli_run_startup_error(
     monkeypatch.setattr(Fulmen, "run", fail)
     assert main(["run", "sample_app:app"]) == 1
     assert "failed to start" in capsys.readouterr().err
+
+
+# -- `fulmen routes` ---------------------------------------------------------------
+
+
+def test_routes_lists_plugin_commands(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`fulmen routes` names the app's plugins ahead of the route table."""
+    assert main(["routes", "plugin_fixture_app:app"]) == 0
+    out = capsys.readouterr().out
+    assert "plugins: key-tools 1.0" in out
+    assert "GET     /x -> x" in out
+
+
+def test_routes_hooks_flag_lists_chains_and_errors(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["routes", "hooks_fixture_app:app", "--hooks"]) == 0
+    out = capsys.readouterr().out
+    assert "guard" in out
+    assert "allow_all" in out
+    assert "ValueError" in out
+
+
+def test_routes_hooks_flag_prints_fallback(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A route with no guards and no `on_error` prints `(no hooks)`."""
+    assert main(["routes", "plugin_fixture_app:app", "--hooks"]) == 0
+    out = capsys.readouterr().out
+    assert "(no hooks)" in out
+
+
+def test_routes_bad_app_specifier(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["routes", "bogus"]) == 2
+    assert "module:attribute" in capsys.readouterr().err
+
+
+def test_routes_compile_failure(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["routes", "badcompile_fixture_app:app"]) == 1
+    assert "setup exploded" in capsys.readouterr().err
+
+
+def test_routes_inserts_cwd_when_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Console-script mode: `sys.path` lacks `""` — the CLI inserts it."""
+    import sys
+
+    import plugin_fixture_app  # noqa: F401 -- warm sys.modules for _load_app
+
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != ""])
+    assert main(["routes", "plugin_fixture_app:app"]) == 0
+    assert "" in sys.path
+
+
+# -- plugin command dispatch --------------------------------------------------------
+
+
+def test_plugin_command_bad_app_specifier(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["rotate-keys", "no_such_module_xyz:app"]) == 2
+    assert "cannot import module" in capsys.readouterr().err
+
+
+def test_plugin_command_reports_resolution_problems(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["shared-cmd", "clidup_fixture_app:app"]) == 1
+    err = capsys.readouterr().err
+    assert "both register CLI command `shared-cmd`" in err
+
+
+def test_plugin_command_handler_failure(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["explode", "failcli_fixture_app:app"]) == 1
+    assert "command blew up" in capsys.readouterr().err
+
+
+# -- `python -m fulmen.cli` -----------------------------------------------------------
+
+
+def test_main_module_entrypoint() -> None:
+    """`python -m fulmen.cli` is the console entry point — `runpy` can't
+    drive it under pytest's import hook, so run a real interpreter."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
+    result = subprocess.run(
+        [sys.executable, "-m", "fulmen.cli", "info"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "native components" in result.stdout
+
+
+def test_main_reports_unresolvable_app_spec() -> None:
+    """An import failure in `module:attr` prints the error and exits 2."""
+    assert main(["definitely_missing_module_zzz:app"]) == 2

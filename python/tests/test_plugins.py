@@ -7,9 +7,11 @@ group scoping, and post-compile sealing (§14.8).
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from conftest import fetch
-from fulmen import Created, Fulmen, JSONResponse, Request, StartupError
+from fulmen import Created, Fulmen, JSONResponse, Model, Request, StartupError
 from fulmen.cli import main
 
 
@@ -76,6 +78,13 @@ def test_handle_forwards_plugin_attributes() -> None:
     app = _app()
     auth = app.use(Auth())
     assert auth.Claims is dict
+
+
+class _Item(Model):
+    x: int
+
+
+_Item.__qualname__ = "Item"
 
 
 class _NoVersion:
@@ -606,3 +615,413 @@ def test_mounted_groups_seal_with_the_app(serve) -> None:
         group.get("/late")
     with pytest.raises(RuntimeError, match="sealed"):
         group.use(Probe("late"))
+
+
+# -- handle and context surfaces ------------------------------------------------
+
+
+def test_handle_repr_and_private_fallthrough() -> None:
+    app = _app()
+    handle = app.use(Probe("probe"))
+    assert repr(handle) == "<fulmen.PluginHandle probe 1.0>"
+    # `__getattr__` guards `_plugin` itself so the object pickles/copies safely.
+    with pytest.raises(AttributeError):
+        handle.__getattr__("_plugin")
+    with pytest.raises(AttributeError):
+        handle.__getattr__("missing_attribute")
+
+
+def test_context_identity_properties() -> None:
+    """`ctx.app`/`ctx.plugin_name` expose the registration owner."""
+    app = _app()
+    probe = Probe("probe")
+    app.use(probe)
+    app._compile_native()
+    assert probe.ctx.app is app
+    assert probe.ctx.plugin_name == "probe"
+
+
+def test_add_hook_rejects_an_unknown_phase() -> None:
+    class BadPhase:
+        name = "bad-phase"
+        version = "1.0"
+
+        def setup(self, ctx):
+            with pytest.raises(ValueError, match="unknown hook phase"):
+                ctx.add_hook("not-a-phase", lambda request: None)
+
+    app = _app()
+    app.use(BadPhase())
+    app._compile_native()
+
+
+def test_every_ctx_hook_shortcut(serve) -> None:
+    """The phase shortcuts all funnel into `add_hook` — registering one
+    per phase exercises each wrapper."""
+    calls: list[str] = []
+
+    class AllHooks:
+        name = "all-hooks"
+        version = "1.0"
+
+        def setup(self, ctx):
+            for phase in (
+                "on_request",
+                "before_route",
+                "guard",
+                "resolve",
+                "before_handle",
+                "after_handle",
+                "on_response",
+                "after_response",
+            ):
+                getattr(ctx, phase)(lambda request, *rest, p=phase: calls.append(p) or None)
+
+        @staticmethod
+        def _ok(*args):
+            return None
+
+    app = _app()
+    app.use(AllHooks())
+
+    @app.get("/x")
+    def x() -> str:
+        return "x"
+
+    base = serve(app)
+    assert fetch(f"{base}/x").status == 200
+
+
+def test_ctx_route_method_shortcuts(serve) -> None:
+    """put/patch/delete/head/options mirror `get`/`post`."""
+    responses = {"PUT": "p", "PATCH": "pa", "DELETE": "d", "HEAD": "h", "OPTIONS": "o"}
+
+    class MethodPlugin:
+        name = "methods"
+        version = "1.0"
+
+        def setup(self, ctx):
+            for method in ("put", "patch", "delete", "head", "options"):
+                upper = method.upper()
+                getattr(ctx, method)(f"/{method}")(lambda m=upper: responses[m])
+
+    app = _app()
+    app.use(MethodPlugin())
+    base = serve(app)
+    for method, expected in (("PUT", "p"), ("PATCH", "pa"), ("DELETE", "d"), ("OPTIONS", "o")):
+        response = fetch(f"{base}/{method.lower()}", method=method)
+        assert response.status == 200
+        assert response.body == expected.encode()
+
+
+def test_ctx_mount_rejects_non_fulmen() -> None:
+    class BadMount:
+        name = "bad-mount"
+        version = "1.0"
+
+        def setup(self, ctx):
+            with pytest.raises(TypeError, match="mount expects a Fulmen"):
+                ctx.mount(object())
+
+    app = _app()
+    app.use(BadMount())
+    app._compile_native()
+
+
+def test_ctx_on_error_rejects_non_exception() -> None:
+    class BadOnError:
+        name = "bad-onerror"
+        version = "1.0"
+
+        def setup(self, ctx):
+            with pytest.raises(TypeError, match="expects an exception class"):
+                ctx.on_error("ValueError")
+
+    app = _app()
+    app.use(BadOnError())
+    app._compile_native()
+
+
+# -- OpenAPI component and CLI validation ---------------------------------------
+
+
+def test_component_unknown_section_raises() -> None:
+    class BadSection:
+        name = "bad-section"
+        version = "1.0"
+
+        def setup(self, ctx):
+            with pytest.raises(ValueError, match="unknown OpenAPI components section"):
+                ctx.add_openapi_component("not-a-section", "X", {})
+
+    app = _app()
+    app.use(BadSection())
+    app._compile_native()
+
+
+def test_component_redeclare_in_one_plugin_raises() -> None:
+    class Redeclarer:
+        name = "redeclarer"
+        version = "1.0"
+
+        def setup(self, ctx):
+            ctx.add_openapi_component("schemas", "Same", {"type": "object"})
+            with pytest.raises(ValueError, match="redeclares OpenAPI component"):
+                ctx.add_openapi_component("schemas", "Same", {"type": "object"})
+
+    app = _app()
+    app.use(Redeclarer())
+    app._compile_native()
+
+
+def test_cli_command_name_validation() -> None:
+    class BadNames:
+        name = "bad-names"
+        version = "1.0"
+
+        def setup(self, ctx):
+            with pytest.raises(ValueError, match="invalid plugin command name"):
+                ctx.cli_command("Not-A-Command")
+            with pytest.raises(ValueError, match="collides with a built-in"):
+                ctx.cli_command("run")
+            ctx.cli_command("good-name", lambda app, argv: 0)
+            with pytest.raises(ValueError, match="redeclares CLI command"):
+                ctx.cli_command("good-name", lambda app, argv: 0)
+
+    app = _app()
+    app.use(BadNames())
+    app._compile_native()
+
+
+def test_check_rule_uses_docstring_when_no_description() -> None:
+    captured: dict[str, str] = {}
+
+    class DocRule:
+        name = "doc-rule"
+        version = "1.0"
+
+        def setup(self, ctx):
+            @ctx.check_rule("FUL-DOC-001", fixable=True)
+            def rule(app):
+                """The docstring becomes the description."""
+                return []
+
+            captured["description"] = ctx._check_rules[0].description
+
+    app = _app()
+    app.use(DocRule())
+    app._compile_native()
+    assert captured["description"] == "The docstring becomes the description."
+
+
+def test_cross_plugin_cli_command_collision_is_a_problem(capsys) -> None:
+    """Two plugins registering the same `fulmen <cmd>` is a startup problem."""
+
+    class First:
+        name = "first"
+        version = "1.0"
+
+        def setup(self, ctx):
+            ctx.cli_command("shared-cmd", lambda app, argv: 0)
+
+    class Second:
+        name = "second"
+        version = "1.0"
+
+        def setup(self, ctx):
+            ctx.cli_command("shared-cmd", lambda app, argv: 0)
+
+    app = _app()
+    app.use(First())
+    app.use(Second())
+    with pytest.raises(StartupError, match="both register CLI command `shared-cmd`"):
+        app._compile_native()
+
+
+def test_cross_plugin_check_rule_collision_is_a_problem() -> None:
+    class First:
+        name = "first"
+        version = "1.0"
+
+        def setup(self, ctx):
+            @ctx.check_rule("FUL-SAME-001")
+            def rule(app):
+                return []
+
+    class Second:
+        name = "second"
+        version = "1.0"
+
+        def setup(self, ctx):
+            @ctx.check_rule("FUL-SAME-001")
+            def rule(app):
+                return []
+
+    app = _app()
+    app.use(First())
+    app.use(Second())
+    with pytest.raises(StartupError, match="both register check rule `FUL-SAME-001`"):
+        app._compile_native()
+
+
+# -- requires/conflicts validation (§13.2) ---------------------------------------
+
+
+def test_requires_and_conflicts_must_be_name_sequences() -> None:
+    class BadRequires:
+        name = "bad-requires"
+        version = "1.0"
+        requires = "other"  # a bare string is not a sequence of names
+
+        def setup(self, ctx):
+            return None
+
+    app = _app()
+    with pytest.raises(TypeError, match="`requires` must be a sequence"):
+        app.use(BadRequires())
+
+    class BadConflictItem:
+        name = "bad-conflict-item"
+        version = "1.0"
+        conflicts: ClassVar = ["other", 42]
+
+        def setup(self, ctx):
+            return None
+
+    with pytest.raises(TypeError, match="`conflicts` must be a sequence"):
+        app.use(BadConflictItem())
+
+    class EmptyName:
+        name = "empty-name"
+        version = "1.0"
+        requires: ClassVar = [""]
+
+        def setup(self, ctx):
+            return None
+
+    with pytest.raises(TypeError, match="`requires` must be a sequence"):
+        app.use(EmptyName())
+
+    class NonIterable:
+        name = "non-iterable"
+        version = "1.0"
+        requires = 42
+
+        def setup(self, ctx):
+            return None
+
+    with pytest.raises(TypeError, match="`requires` must be a sequence"):
+        app.use(NonIterable())
+
+
+def test_requires_none_is_treated_as_empty() -> None:
+    class NoneRequires:
+        name = "none-requires"
+        version = "1.0"
+        requires = None
+
+        def setup(self, ctx):
+            return None
+
+    app = _app()
+    app.use(NoneRequires())
+    app._compile_native()
+
+
+def test_order_integrity_flags_require_pointing_forwards() -> None:
+    """A plugin `use()`d on the app cannot `requires` a plugin that only
+    exists inside a plugin-mounted group — that one always runs later."""
+
+    class Inner:
+        name = "inner"
+        version = "1.0"
+
+        def setup(self, ctx):
+            return None
+
+    class Mounter:
+        name = "mounter"
+        version = "1.0"
+
+        def setup(self, ctx):
+            group = Fulmen(prefix="/mounted", openapi_url=None)
+            group.use(Inner())
+            ctx.mount(group)
+
+    class Early:
+        name = "early"
+        version = "1.0"
+        requires: ClassVar = ["inner"]
+
+        def setup(self, ctx):
+            return None
+
+    app = _app()
+    app.use(Early())
+    app.use(Mounter())
+    with pytest.raises(StartupError, match="requires `inner`, which runs later"):
+        app._compile_native()
+
+
+def test_plugin_mount_depth_is_capped() -> None:
+    """A plugin whose `setup` mounts a group that `use()`s another of the
+    same kind would nest forever — the walk bails after 16 waves."""
+
+    class Matryoshka:
+        name = "matryoshka"
+        version = "1.0"
+
+        def setup(self, ctx):
+            group = Fulmen(prefix="/g", openapi_url=None)
+            group.use(Matryoshka())
+            ctx.mount(group)
+
+    app = _app()
+    app.use(Matryoshka())
+    with pytest.raises(StartupError, match="mount nesting exceeds the supported depth"):
+        app._compile_native()
+
+
+def test_component_collision_with_generated_schema(serve) -> None:
+    """`merge_components` reports a plugin component colliding with a
+    generated `schemas/<Model>` entry — a `StartupError`, not a silent win."""
+
+    class Collider:
+        name = "collider"
+        version = "1.0"
+
+        def setup(self, ctx):
+            ctx.add_openapi_component("schemas", "Item", {"type": "object"})
+
+    app = Fulmen(openapi_url=None)
+    app.use(Collider())
+
+    @app.get("/item")
+    def item() -> _Item:
+        return _Item(x=1)
+
+    with pytest.raises(StartupError, match="collides with a generated component"):
+        app.openapi()
+
+
+def test_sealed_context_rejects_remaining_registrations() -> None:
+    """§14.8: after `setup()` returns every registration surface raises."""
+    app = _app()
+    probe = Probe("sealed")
+    app.use(probe)
+    app._compile_native()
+    ctx = probe.ctx
+    with pytest.raises(RuntimeError, match="context is closed"):
+        ctx.mount(Fulmen(prefix="/g", openapi_url=None))
+    with pytest.raises(RuntimeError, match="context is closed"):
+        ctx.on_error(ValueError)
+    with pytest.raises(RuntimeError, match="context is closed"):
+        ctx.add_provider(object())
+    with pytest.raises(RuntimeError, match="context is closed"):
+        ctx.cli_command("late-cmd", lambda app, argv: 0)
+    with pytest.raises(RuntimeError, match="context is closed"):
+        ctx.check_rule("FUL-LATE-001")
+    with pytest.raises(RuntimeError, match="context is closed"):
+        ctx.on_startup(lambda: None)
+    with pytest.raises(RuntimeError, match="context is closed"):
+        ctx.on_shutdown(lambda: None)

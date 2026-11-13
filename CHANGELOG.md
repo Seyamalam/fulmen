@@ -145,6 +145,17 @@ exists. Move the `Unreleased` entries under the new version heading first.
   original's scope and restore cleanly. `Provider` and `Scope` are
   public exports.
 
+### Fixed
+
+- `PydanticValidator` hint rewriting collapsed `Annotated` to a single
+  argument (`Annotated[int]`, a `TypeError`) when every nested marker
+  converted to a no-op — e.g. `list[Annotated[int, pydantic.Strict()]]`.
+  No-op marker lists now rewrite to the bare base type.
+- `PydanticValidator` copied `Field(pattern=...)` metadata verbatim into
+  the spec, so a compiled `re.Pattern` reached the wire as
+  `re.compile('...')` text instead of its source — now unwrapped to
+  `.pattern`, matching the `Annotated` metadata path.
+
 ## [0.2.0] - 2026-11-12
 
 Milestone M2 — "types". Handler signatures are the contract: every
