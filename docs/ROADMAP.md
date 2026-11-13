@@ -247,8 +247,8 @@ injection with scopes, adapter interfaces, native plugin SDK (unstable ABI),
 
 ### Testing
 
-- [ ] M3.21 `TestClient` (sync and async), in-process native path, lifecycle hooks, `raise_server_errors`
-- [ ] M3.22 `Settings` with `Secret[str]`, source precedence, validation at startup (DESIGN.md §20)
+- [x] M3.21 `TestClient` (sync and async), in-process native path, lifecycle hooks, `raise_server_errors` — `fulmen.testing.TestClient`/`AsyncTestClient` drive the compiled app via `serve_for_test` on an ephemeral loopback port (a socket-free native dispatch entry point does not exist yet — flagged in DESIGN.md §22); lifecycle hooks run on enter/exit, `raise_server_errors` re-raises unhandled exceptions through a `BaseException` `on_error` fallback
+- [x] M3.22 `Settings` with `Secret[str]`, source precedence, validation at startup (DESIGN.md §20) — `fulmen.settings.Settings`/`Secret`; defaults < `fulmen.toml` `[tool.fulmen.<section>]` < opt-in `env_file` < env vars < constructor kwargs; `Secret` masks `str`/`repr`/`format`; descriptor-validated at compile into one `StartupError` per app, injectable via `Fulmen(settings=…)` and `settings: AppSettings` handler params
 
 ### Guardrails added in M3
 

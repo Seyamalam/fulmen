@@ -1184,9 +1184,30 @@ app = Fulmen(settings=AppSettings)
 - Sources, lowest to highest priority: defaults, `fulmen.toml`, `.env`
   (development only; ignored in production mode with a warning), environment
   variables, CLI flags.
+- Class arguments: `env_prefix` (default `"FULMEN_"`), `env_file`
+  (opt-in dot-env path — never loaded unless configured, ignored when
+  `FULMEN_ENV=production` with a `UserWarning`), `toml_file` (default
+  `./fulmen.toml`; `None` disables), `toml_section`
+  (`[tool.fulmen.<section>]`; derived from `env_prefix` when unset —
+  `"FULMEN_JWT_"` → `[tool.fulmen.jwt]`). Instance kwargs override
+  everything; `_env_prefix`, `_env_file`, `_toml_file`, `_toml_section`
+  and `_environ` tune the sources themselves (the `_environ` hook is how
+  tests isolate the environment).
 - Validated at startup with the schema engine. Missing required settings
-  stop the boot with every missing name listed.
+  stop the boot with every missing name listed; each problem names the
+  field and the source it failed from (`StartupError.problems` carries
+  the list). `__field_sources__` records which tier resolved each field.
+- `Secret[T]` wraps a value so `str`/`repr`/`format`/log interpolation
+  print `**********`; `get_secret_value()` is the only way out. `Secret`
+  is valid as the whole field type (optionally inside `Optional`) —
+  `list[Secret[str]]` and friends are rejected at class creation.
 - Settings are injectable: `settings: AppSettings` in any handler or provider.
+  A `Settings`-typed parameter is injected by the app at startup rather
+  than extracted from the wire, so it takes no `Annotated` source marker
+  and no default. `Fulmen(settings=…)` accepts a class (resolved at
+  compile) or a ready instance; `app.settings` reads it back. A mounted
+  app with its own `settings=` injects them on its routes; without one
+  it inherits the root's.
 - Plugins read their own section (`[tool.fulmen.jwt]` or `FULMEN_JWT_*`).
 
 ## 21. Observability
@@ -1215,9 +1236,28 @@ def test_create_user():
 
 - In-process: requests go straight into the native pipeline without sockets,
   so tests are fast and exercise exactly the production code path.
+  *Status (M3.21):* the native dispatcher is not yet exposed as a
+  socket-free entry point, so `TestClient`/`AsyncTestClient` drive the
+  same compiled app on an ephemeral loopback port via `serve_for_test` —
+  every request still exercises the real router, hooks, extractors and
+  error routing. A true in-process `dispatch` hook is a native follow-up.
 - Sync and async clients, WebSocket client, provider overrides, frozen clock.
+  *Status (M3.21):* `TestClient` and `AsyncTestClient` cover HTTP
+  (`.get/.post/.put/.patch/.delete/.head/.options`, `params`/`data`/`json`/
+  `headers`/`cookies`, redirect following). WebSocket client, provider
+  overrides and frozen clock are unshipped.
+- Lifecycle: `with TestClient(app)` runs `on_startup` on enter and
+  `on_shutdown` on exit (also `start()`/`stop()`); a bare `client.get(…)`
+  starts lazily.
 - `TestClient(app, raise_server_errors=True)` re-raises handler exceptions
-  for clear test failures.
+  for clear test failures. The client registers a `BaseException`
+  `on_error` fallback that stashes any exception the app's own handlers
+  don't claim and reproduces `problem_for` for `HTTPError`/
+  `ValidationError` — so `on_error` routing and problem responses are
+  unchanged, and a `500` only turns into a test-side raise when the app
+  would have returned the built-in problem.
+- `AsyncTestClient` mirrors the API as `async def` methods (requests run
+  on a worker thread against the same in-process server).
 
 ## 23. Type safety
 
