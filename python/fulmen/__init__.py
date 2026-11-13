@@ -72,6 +72,7 @@ from fulmen.responses import (
     Stream,
     TextResponse,
 )
+from fulmen.settings import Secret, Settings
 from fulmen.types import Email, Raw, Url
 
 if typing.TYPE_CHECKING:
@@ -145,7 +146,9 @@ __all__ = [
     "Request",
     "RequestTimeout",
     "Response",
+    "Secret",
     "ServiceUnavailable",
+    "Settings",
     "StartupError",
     "Stream",
     "Strip",

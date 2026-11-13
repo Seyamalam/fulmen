@@ -19,6 +19,7 @@ UI under `docs_url` when configured.
 
 from __future__ import annotations
 
+import functools
 import inspect
 import typing
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -30,6 +31,7 @@ from fulmen._fulmen import NativeApp, StartupError, compile_descriptor
 from fulmen._fulmen import serve as _serve
 from fulmen.constraints import UNSET
 from fulmen.responses import Response
+from fulmen.settings import Settings
 
 if TYPE_CHECKING:
     from fulmen._fulmen import Descriptor
@@ -120,6 +122,9 @@ class Fulmen:
         "_openapi_url",
         "_prefix",
         "_sealed",
+        "_settings",
+        "_settings_cache",
+        "_settings_instance",
     )
 
     def __init__(
@@ -136,6 +141,7 @@ class Fulmen:
         docs_url: str | None = "/docs",
         debug: bool = False,
         prefix: str = "",
+        settings: type[Settings] | Settings | None = None,
     ) -> None:
         for name, url in (("openapi_url", openapi_url), ("docs_url", docs_url)):
             if url is not None and (not url.startswith("/") or '"' in url):
@@ -146,6 +152,11 @@ class Fulmen:
             raise ValueError(
                 f"prefix must be empty or `/…` without a trailing slash, got {prefix!r}"
             )
+        if settings is not None and not (
+            isinstance(settings, Settings)
+            or (isinstance(settings, type) and issubclass(settings, Settings))  # pyright: ignore[reportUnnecessaryIsInstance]
+        ):
+            raise TypeError(f"settings must be a Settings subclass or instance, got {settings!r}")
         self._debug = debug
         self._declared: list[tuple[str, str, _Handler, _openapi.OperationMeta]] = []
         self._error_handlers: list[tuple[type[BaseException], _Handler, bool]] = []
@@ -155,6 +166,13 @@ class Fulmen:
         self._mounted: list[Fulmen] = []
         self._prefix = prefix
         self._sealed = False
+        self._settings = settings
+        self._settings_instance: Settings | None = (
+            settings if isinstance(settings, Settings) else None
+        )
+        # Settings classes a handler parameter asked for (§20 injection),
+        # resolved once and shared by every route of this app.
+        self._settings_cache: dict[type[Settings], Settings] = {}
         self._api_info = _openapi.ApiInfo(
             title=title,
             version=version,
@@ -368,6 +386,40 @@ class Fulmen:
         self._mounted.append(app)
         return app
 
+    @property
+    def settings(self) -> Settings | None:
+        """The app's resolved settings instance (DESIGN.md §20), or
+        `None` when the app was created without `settings=`."""
+        return self._resolve_app_settings()
+
+    def _resolve_app_settings(self) -> Settings | None:
+        if self._settings_instance is None and (
+            isinstance(self._settings, type) and issubclass(self._settings, Settings)  # pyright: ignore[reportUnnecessaryIsInstance]
+        ):
+            self._settings_instance = self._settings()
+        return self._settings_instance
+
+    def _resolve_settings(self, cls: type[Settings]) -> Settings:
+        """The instance injected for a `cls`-annotated handler parameter.
+
+        A class matching the app's own settings resolves to `app.settings`;
+        anything else is constructed once per app and shared by its routes.
+        """
+        instance = self._resolve_app_settings()
+        if isinstance(instance, cls):
+            return instance
+        cached = self._settings_cache.get(cls)
+        if cached is None:
+            cached = cls()
+            self._settings_cache[cls] = cached
+        return cached
+
+    def _settings_resolver_for(self, app: Fulmen) -> Callable[[type[Settings]], Settings]:
+        """Which app's settings a route declared on `app` injects — a
+        mounted app with its own settings uses them; otherwise the root's."""
+        owner = self if app is self or app._settings is None else app
+        return owner._resolve_settings
+
     def _walk(
         self, prefix: str = "", scopes: tuple[Fulmen, ...] = ()
     ) -> Iterator[tuple[Fulmen, str, tuple[Fulmen, ...]]]:
@@ -441,6 +493,7 @@ class Fulmen:
         """
         # Group scopes only matter to the native declaration; the
         # document sees the joined paths either way.
+        self._resolve_app_settings()
         specs, problems = self._route_specs({id(app): 0 for app, _b, _c in self._walk()})
         if problems:
             raise _startup_error(problems)
@@ -457,6 +510,10 @@ class Fulmen:
         core compile errors. Compiling seals the declarations (§14.8).
         """
         self._sealed = True
+        # §20: settings resolve and validate at startup — a settings
+        # class with missing/invalid values raises `StartupError` here
+        # before a single route is registered.
+        self._resolve_app_settings()
         native = NativeApp(debug=self._debug)
         # One group scope per mounted application; the app's own
         # registrations stay in the application scope (`0`).
@@ -493,8 +550,15 @@ class Fulmen:
         problems: list[str] = []
         for app, base, chain in self._walk():
             layers = [scope_ids[id(group)] for group in chain]
+            resolve_settings = self._settings_resolver_for(app)
             for method, path, handler, meta in app._declared:
-                spec = _inspect_handler(method, _join_paths(base, path), handler, problems)
+                spec = _inspect_handler(
+                    method,
+                    _join_paths(base, path),
+                    handler,
+                    problems,
+                    resolve_settings,
+                )
                 if spec is not None:
                     specs.append((spec, meta, layers))
         return specs, problems
@@ -548,6 +612,7 @@ def _inspect_handler(
     path: str,
     handler: _Handler,
     problems: list[str],
+    resolve_settings: Callable[[type[Settings]], Settings],
 ) -> _RouteSpec | None:
     """Turn one recorded declaration into a `_RouteSpec`, or append a
     problem and return `None`."""
@@ -566,6 +631,7 @@ def _inspect_handler(
     path_names = frozenset(_path_param_names(path))
     builder = _typing.SpecBuilder()
     infos: list[_typing.ParamInfo] = []
+    injected: dict[str, Settings] = {}
     try:
         for name, parameter in signature.parameters.items():
             if parameter.kind in (
@@ -578,6 +644,35 @@ def _inspect_handler(
                 )
                 return None
             hint = hints.get(name, inspect.Parameter.empty)
+            base_hint = (
+                typing.get_args(hint)[0] if typing.get_origin(hint) is typing.Annotated else hint
+            )
+            if isinstance(base_hint, type) and issubclass(base_hint, Settings):
+                # §20: a Settings-typed parameter is injected, not read
+                # from the wire — it never reaches `call_args`.
+                if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+                    problems.append(
+                        f"{label}: settings parameter `{name}` cannot be positional-only"
+                    )
+                    return None
+                if parameter.default is not inspect.Parameter.empty:
+                    problems.append(
+                        f"{label}: settings parameter `{name}` cannot declare a "
+                        "default — the app injects the resolved instance"
+                    )
+                    return None
+                if typing.get_origin(hint) is typing.Annotated:
+                    problems.append(
+                        f"{label}: settings parameter `{name}` takes no `Annotated` "
+                        "source marker — a Settings type is injected, not extracted"
+                    )
+                    return None
+                try:
+                    injected[name] = resolve_settings(base_hint)
+                except Exception as exc:  # noqa: BLE001 -- settings load failures are startup problems
+                    problems.append(str(exc))
+                    return None
+                continue
             default = UNSET if parameter.default is inspect.Parameter.empty else parameter.default
             infos.append(
                 _typing.param_spec(builder, name, hint, default, parameter.kind, path_names, label)
@@ -619,16 +714,40 @@ def _inspect_handler(
         )
         for info in infos
     ]
+    is_async = inspect.iscoroutinefunction(handler)
+    if injected:
+        handler = _inject_settings(handler, injected, is_async)
     return (
         method,
         path,
         param_types,
         call_args,
         handler,
-        inspect.iscoroutinefunction(handler),
+        is_async,
         any(variant.status == 204 for variant in variants),
         response_descs,
     )
+
+
+def _inject_settings(handler: _Handler, injected: dict[str, Settings], is_async: bool) -> _Handler:
+    """Wrap `handler` so `Settings` parameters — removed from the call
+    spec — arrive as keyword arguments the app resolved at startup."""
+    if is_async:
+
+        @functools.wraps(handler)
+        async def async_injected(*args: Any, **kwargs: Any) -> Any:
+            return await typing.cast(
+                typing.Coroutine[Any, Any, Any],
+                handler(*args, **injected, **kwargs),
+            )
+
+        return async_injected
+
+    @functools.wraps(handler)
+    def sync_injected(*args: Any, **kwargs: Any) -> Any:
+        return handler(*args, **injected, **kwargs)
+
+    return sync_injected
 
 
 def _route_entry(
