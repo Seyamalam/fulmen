@@ -44,6 +44,41 @@ exists. Move the `Unreleased` entries under the new version heading first.
 - Registration seals at compile (§14.8, M3.9): routes, hooks,
   `on_error` handlers, mounts and lifecycle callbacks registered after
   `run()`/`_compile_native()` raise `RuntimeError`.
+- `Settings` + `Secret` (M3.22, DESIGN.md §20): declare typed fields on
+  a `Settings` subclass (`env_prefix`, `env_file`, `toml_file`,
+  `toml_section` class arguments) and values resolve across sources —
+  lowest to highest: defaults, `fulmen.toml` (`[tool.fulmen]` or the
+  section derived from `env_prefix`), the opt-in `env_file` (never
+  loaded unless configured; ignored with a warning when
+  `FULMEN_ENV=production`), environment variables (`env_prefix + FIELD`),
+  and constructor keyword arguments. `Secret[T]` prints `**********`
+  from `str`/`repr`/`format`/logging — only `.get_secret_value()`
+  exposes it. Fields validate through the schema engine at startup
+  (`Field()`, `Alias`, constraints, env-string lax coercion and
+  JSON-decoded containers); missing or invalid values raise one
+  `StartupError` listing every problem with its source, and
+  `__field_sources__` records which tier resolved each field.
+  `Fulmen(settings=…)` takes a class or instance — `app.settings`
+  resolves it at compile — and a `settings: AppSettings` handler
+  parameter (sync or async, on root or mounted apps) is injected with
+  the resolved instance rather than read from the wire.
+- `fulmen.testing` (M3.21, DESIGN.md §22): `TestClient` and
+  `AsyncTestClient` drive a `Fulmen` app end-to-end through the compiled
+  pipeline on an ephemeral loopback server (`serve_for_test` — the
+  socket-free dispatch entry point §22 describes is a native
+  follow-up). `.request` plus `.get`/`.post`/`.put`/`.patch`/`.delete`/
+  `.head`/`.options` convenience methods take `params`, `data`
+  (form mapping or raw), `json`, `headers` and `cookies`; redirects
+  follow by default; responses surface `status`/`headers`/`body`/
+  `text`/`json()`/`header()`. `with TestClient(app)` runs `on_startup`
+  on enter and `on_shutdown` on exit (`start()`/`stop()` work outside
+  `with` too, and the first request starts lazily).
+  `raise_server_errors=True` (the default) re-raises unhandled handler
+  exceptions in the test via a `BaseException` `on_error` fallback —
+  registered `on_error` handlers and `HTTPError`/`ValidationError`
+  problem responses still behave exactly as in production.
+  `AsyncTestClient` exposes the same surface as `async def` methods for
+  `asyncio.run` tests.
 
 ## [0.2.0] - 2026-11-12
 
