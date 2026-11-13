@@ -57,6 +57,10 @@ mod _fulmen {
             crate::plugins::resolve_plugin_order,
             m
         )?)?;
+        m.add_function(pyo3::wrap_pyfunction!(
+            crate::plugins::describe_native_plugin,
+            m
+        )?)?;
         Ok(())
     }
 
@@ -65,6 +69,7 @@ mod _fulmen {
     fn native_components() -> Vec<&'static str> {
         vec![
             fulmen_core::NAME,
+            fulmen_plugin_sdk::NAME,
             fulmen_schema::NAME,
             fulmen_security::NAME,
             fulmen_server::NAME,

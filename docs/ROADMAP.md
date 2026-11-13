@@ -234,10 +234,10 @@ injection with scopes, adapter interfaces, native plugin SDK (unstable ABI),
 
 ### Native plugins
 
-- [ ] M3.14 `fulmen-plugin-sdk` crate: safe trait, `export_plugin!` macro, `catch_unwind` boundary
-- [ ] M3.15 C ABI v1 (DESIGN.md §13.4), `PyCapsule` loading, ABI version check
-- [ ] M3.16 Example native plugin in `examples/native-plugin`, built and tested in `just ci`
-- [ ] M3.17 Add `fulmen-plugin-sdk` to `UNSAFE_ALLOWED` with a DESIGN.md entry (maintainer approval)
+- [x] M3.14 `fulmen-plugin-sdk` crate: safe trait, `export_plugin!` macro, `catch_unwind` boundary — `FulmenPlugin` (`Send + Sync`, `&self` per-phase hooks), borrowed `RequestView`/`ResponseView`, `Decision`/`PluginResponse`/`PluginError`; `export_plugin!` emits the v1 entry + per-phase panic-catching trampolines — plugin crates stay `unsafe_code`-denied
+- [x] M3.15 C ABI v1 (DESIGN.md §13.4), `PyCapsule` loading, ABI version check — `FulmenPluginDescriptorV1` travels in a `fulmen.plugin.v1` capsule; `NativeApp::add_native_plugin` validates `abi_version`/`struct_size` before `create`; borrowed `(ptr,len)` strings only, header/response access via host vtable shims, `destroy` exactly once
+- [x] M3.16 Example native plugin in `examples/native-plugin`, built and tested in `just ci` — `RequestIdPlugin` stamps `x-request-id` (`config_json` prefix); `fulmen_plugin_v1_bad`/`fulmen_plugin_v1_panic` fixture exports feed the ABI-mismatch and panic-containment tests
+- [x] M3.17 Add `fulmen-plugin-sdk` to `UNSAFE_ALLOWED` with a DESIGN.md entry (maintainer approval) — unsafe confined to the SDK; `fulmen-py` extracts the capsule pointer with pyo3's safe `pointer_checked` and every deref lives in `host::LoadedPlugin`
 
 ### Adapters
 
@@ -253,7 +253,7 @@ injection with scopes, adapter interfaces, native plugin SDK (unstable ABI),
 ### Guardrails added in M3
 
 - [ ] M3.23 Plugin isolation checks and startup validation (DESIGN.md §14.1, §14.8)
-- [ ] M3.24 ABI compatibility test: plugin built against SDK N loads in Fulmen N, refused by a bumped ABI
+- [x] M3.24 ABI compatibility test: plugin built against SDK N loads in Fulmen N, refused by a bumped ABI — `crates/fulmen-plugin-sdk/tests/abi.rs` round-trips the descriptor through the real `LoadedPlugin` path and asserts `abi_version == FULMEN_PLUGIN_ABI`; the `fulmen_plugin_v1_bad` export (abi_version 9999) is refused with `expected 1, found 9999` — also exercised end-to-end from Python (`python/tests/test_native_plugin.py`)
 
 ### Exit criteria
 

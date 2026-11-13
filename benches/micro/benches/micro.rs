@@ -361,9 +361,113 @@ fn dispatch(c: &mut Criterion) {
     group.finish();
 }
 
+/// A plugin whose `on_request` returns `Continue` untouched — the pure
+/// cross-ABI call cost the M3 exit bar measures.
+#[derive(Debug)]
+struct NoopPlugin;
+
+impl fulmen_plugin_sdk::FulmenPlugin for NoopPlugin {
+    const NAME: &'static str = "bench-noop";
+    const VERSION: &'static str = "0.0.0";
+
+    fn setup(_config: &[u8]) -> Result<Self, fulmen_plugin_sdk::PluginError> {
+        Ok(Self)
+    }
+
+    fn on_request(
+        &self,
+        _cx: &fulmen_plugin_sdk::RequestView<'_>,
+    ) -> Result<fulmen_plugin_sdk::Decision, fulmen_plugin_sdk::PluginError> {
+        Ok(fulmen_plugin_sdk::Decision::Continue)
+    }
+}
+
+/// Load `descriptor`'s plugin through the real host path; a bench
+/// fixture failure is a fixture bug that must abort the run.
+#[expect(
+    clippy::unwrap_used,
+    reason = "bench descriptors are valid by construction; a load failure is a fixture bug that must abort the run"
+)]
+fn load_plugin(
+    descriptor: &fulmen_plugin_sdk::FulmenPluginDescriptorV1,
+) -> fulmen_plugin_sdk::host::LoadedPlugin {
+    let plugin =
+        fulmen_plugin_sdk::host::LoadedPlugin::load(std::ptr::NonNull::from(descriptor)).unwrap();
+    plugin.create(b"{}").unwrap();
+    plugin
+}
+
+/// The M3 exit bar (docs/DESIGN.md §13.4, ROADMAP M3): a native plugin
+/// hook must cost under 1µs per request. `LoadedPlugin::run_hook` covers
+/// the entire marginal cost — `HookArgs`/`FfiHookCxV1` assembly, the
+/// `catch_unwind` boundary, the indirect `extern "C"` call and outcome
+/// decoding — measured for a no-op `on_request` (pure overhead) and the
+/// example plugin's real `on_response` (a header read, an atomic counter
+/// bump and a header set).
+fn native_plugin(c: &mut Criterion) {
+    use fulmen_plugin_sdk::Phase;
+    use fulmen_plugin_sdk::host::{HookArgs, ResponseMut};
+
+    let remote = SocketAddr::from(([10, 0, 0, 1], 44123));
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(
+        http::header::USER_AGENT,
+        http::HeaderValue::from_static("bench/1"),
+    );
+    let method = Method::GET;
+    let path = "/bench";
+
+    let noop_desc = fulmen_plugin_sdk::describe::<NoopPlugin>(&[Phase::OnRequest]);
+    let noop = load_plugin(&noop_desc);
+    let rid_desc =
+        fulmen_plugin_sdk::describe::<fulmen_example_plugin::RequestIdPlugin>(&[Phase::OnResponse]);
+    let request_id = load_plugin(&rid_desc);
+
+    let mut group = c.benchmark_group("native_plugin");
+    group.bench_function("run_hook/on_request_continue", |b| {
+        let body = Bytes::new();
+        b.iter(|| {
+            let mut args = HookArgs {
+                method: method.as_str(),
+                path,
+                query: Some("q=1"),
+                headers: &request_headers,
+                body: &body,
+                remote_addr: remote,
+                response: None,
+            };
+            black_box(noop.run_hook(Phase::OnRequest.index(), black_box(&mut args)))
+        });
+    });
+    group.bench_function("run_hook/on_response_request_id", |b| {
+        let body = Bytes::new();
+        b.iter_batched(
+            || (StatusCode::OK, HeaderMap::new(), Bytes::new()),
+            |(mut status, mut headers, mut res_body)| {
+                let mut args = HookArgs {
+                    method: method.as_str(),
+                    path,
+                    query: None,
+                    headers: &request_headers,
+                    body: &body,
+                    remote_addr: remote,
+                    response: Some(ResponseMut {
+                        status: &mut status,
+                        headers: &mut headers,
+                        body: &mut res_body,
+                    }),
+                };
+                black_box(request_id.run_hook(Phase::OnResponse.index(), black_box(&mut args)))
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default();
-    targets = router_match, router_compile, dispatch
+    targets = router_match, router_compile, dispatch, native_plugin
 }
 criterion_main!(benches);

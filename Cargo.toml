@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "benches/micro"]
+members = ["crates/*", "benches/micro", "examples/native-plugin"]
 
 [workspace.package]
 version = "0.2.0"
@@ -13,6 +13,8 @@ homepage = "https://github.com/Seyamalam/fulmen"
 
 [workspace.dependencies]
 fulmen-core = { path = "crates/fulmen-core", version = "0.2.0" }
+fulmen-example-plugin = { path = "examples/native-plugin", version = "0.2.0" }
+fulmen-plugin-sdk = { path = "crates/fulmen-plugin-sdk", version = "0.2.0" }
 fulmen-schema = { path = "crates/fulmen-schema", version = "0.2.0" }
 fulmen-security = { path = "crates/fulmen-security", version = "0.2.0" }
 fulmen-server = { path = "crates/fulmen-server", version = "0.2.0" }
@@ -27,6 +29,9 @@ criterion = "0.8.2"
 # Pattern constraint (DESIGN.md §11.2): finite-automata regex, no backtracking,
 # so no ReDoS. Used by fulmen-schema.
 regex = "1.13"
+# Plugin `config_json` payloads are JSON (DESIGN.md §13.4); the example
+# native plugin parses its config with it.
+serde_json = "1.0"
 # Property tests for the schema engine (ROADMAP M2.20) — dev-dependency only.
 proptest = "1.12"
 

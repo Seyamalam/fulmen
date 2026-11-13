@@ -9,6 +9,7 @@
 //! `fulmen-core` without an interpreter.
 
 use pyo3::prelude::*;
+use pyo3::types::PyCapsule;
 
 /// One `use()` registration: `(name, requires, conflicts)` — the
 /// plugin's declared relationships, positionally indexed by
@@ -35,4 +36,34 @@ pub(crate) fn resolve_plugin_order(decls: Vec<UseDecl>) -> (Vec<usize>, Vec<Stri
         .collect();
     let (order, problems) = fulmen_core::resolve_order(&decls);
     (order, problems.iter().map(ToString::to_string).collect())
+}
+
+/// Read a native plugin's metadata without loading it (§13.4):
+/// `(name, version, abi_version, hooked_phases)` for the descriptor in a
+/// `fulmen.plugin.v1` `PyCapsule`.
+///
+/// `NativePlugin` calls this eagerly so a mismatched or malformed
+/// descriptor fails at `use()`, before the app ever compiles.
+///
+/// # Errors
+/// [`TypeError`] when `capsule` isn't a `PyCapsule`, [`ValueError`] when
+/// it isn't named `fulmen.plugin.v1` or the pointer is null, and
+/// [`StartupError`][crate::app::StartupError] for a descriptor that fails
+/// ABI validation (a wrong `abi_version` reports expected vs found).
+#[pyfunction]
+pub(crate) fn describe_native_plugin(
+    capsule: &Bound<'_, PyCapsule>,
+) -> PyResult<(String, String, u32, Vec<String>)> {
+    let pointer = capsule.pointer_checked(Some(fulmen_plugin_sdk::FULMEN_PLUGIN_CAPSULE))?;
+    let info = fulmen_plugin_sdk::host::describe(pointer.cast())
+        .map_err(|err| crate::app::StartupError::new_err(err.to_string()))?;
+    Ok((
+        info.name,
+        info.version,
+        info.abi_version,
+        info.phases
+            .iter()
+            .map(|phase| phase.as_str().to_owned())
+            .collect(),
+    ))
 }

@@ -30,10 +30,6 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 /// What one hook invocation decided.
 pub(crate) enum HookDecision {
     /// Continue the pipeline.
-    #[expect(
-        dead_code,
-        reason = "only native-hook closures (M4+) construct it — the dispatch path matches it today"
-    )]
     Continue,
     /// The phase produced a response — a short-circuit answer for the
     /// decision phases, a replacement for the post-handler phases.
@@ -46,10 +42,6 @@ pub(crate) enum HookDecision {
 /// (`after_handle`/`on_response`/`after_response`): mutating it mutates
 /// what the client receives for the first two; `after_response` gets a
 /// clone, since the response is already produced.
-#[expect(
-    dead_code,
-    reason = "native-hook closures read these fields — the M4 security plugin SDK is the first consumer"
-)]
 pub(crate) struct HookCx<'a> {
     /// The phase the hook is running in.
     pub(crate) phase: Phase,

@@ -25,7 +25,9 @@ PYO3_CRATE = "fulmen-py"
 
 # Crates allowed to opt into `unsafe` with `#![allow(unsafe_code)]` /
 # `#![expect(unsafe_code)]`. Adding a crate here needs a design-doc entry.
-UNSAFE_ALLOWED: set[str] = set()
+# `fulmen-plugin-sdk` owns the native-plugin C ABI boundary (DESIGN.md §13.4)
+# — FFI types, call trampolines, descriptor dereference; approved M3.17.
+UNSAFE_ALLOWED: set[str] = {"fulmen-plugin-sdk"}
 
 MAX_FILE_BYTES = 512 * 1024
 

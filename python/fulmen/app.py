@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
 import typing
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Unpack
@@ -772,6 +773,21 @@ class Fulmen:
         for _use, ctx in plan.entries:
             staged = ctx.staged
             scope = 0 if staged.owner is self else scope_ids[id(staged.owner)]
+            # §13.4: native descriptor capsules validate and load through
+            # the same merge — an ABI mismatch or a failing plugin `setup`
+            # aggregates like any other declaration problem. `ctx.config`
+            # becomes the plugin's `config_json`.
+            for capsule, band, keep in staged.native:
+                try:
+                    native.add_native_plugin(
+                        capsule,
+                        json.dumps(dict(ctx.config)).encode(),
+                        PRIORITY_USER if band is None else band,
+                        scope,
+                        keep,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- load failures aggregate as startup problems (§14.1)
+                    problems.append(f"plugin `{_use.meta.name}`: {exc}")
             for phase, hook, is_async, name, priority in staged.hooks:
                 native.add_hook(phase, hook, is_async, name, priority, scope)
             for exc_class, handler, is_async in staged.error_handlers:

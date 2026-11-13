@@ -285,6 +285,15 @@ pub(crate) struct AppInner {
     /// handlers carry no response spec, so their results always encode
     /// generically.
     pub(crate) empty_contract: Arc<ResponseContract>,
+    /// Loaded native plugins kept alive for the server's lifetime —
+    /// hook closures hold the `LoadedPlugin`; the `Py` keeps the Python
+    /// object (and thus the shared library) loaded so the entry code the
+    /// hooks call is never unmapped mid-flight (§13.4).
+    #[expect(
+        dead_code,
+        reason = "pure keep-alive: holding the Arc and Py is the entire job"
+    )]
+    pub(crate) native_plugins: Vec<(Arc<fulmen_plugin_sdk::host::LoadedPlugin>, Py<PyAny>)>,
 }
 
 /// The `Dispatcher` handed to `fulmen_server::serve`.
@@ -991,6 +1000,6 @@ fn hook_label(request: &Request, phase: Phase) -> Box<str> {
 
 /// Log a message through the `fulmen` logger; attaches briefly and stays
 /// silent when the interpreter is unreachable (shutdown).
-fn log_message(logger: &Py<PyAny>, message: String) {
+pub(crate) fn log_message(logger: &Py<PyAny>, message: String) {
     let _ = Python::try_attach(|py| convert::log_message(py, logger, message));
 }

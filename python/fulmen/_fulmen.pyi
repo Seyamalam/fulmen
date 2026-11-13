@@ -54,6 +54,15 @@ def resolve_plugin_order(
     `problems` aggregates every resolution error (missing requirements,
     conflicts, duplicate names, cycles) as message strings."""
 
+def describe_native_plugin(
+    capsule: Any,
+) -> tuple[str, str, int, list[str]]:
+    """Read a `fulmen.plugin.v1` descriptor capsule's metadata (§13.4):
+    `(name, version, abi_version, hooked_phases)`. Raises `TypeError` for
+    a non-capsule argument, `ValueError` when the capsule isn't named
+    `fulmen.plugin.v1` or the pointer is null, and `StartupError` for an
+    ABI mismatch (expected vs found)."""
+
 class NativeApp:
     """Recorded route declarations, consumed by `serve`/`serve_for_test`.
 
@@ -101,6 +110,20 @@ class NativeApp:
         is_async: bool,
     ) -> None:
         """Record an `on_startup`/`on_shutdown` hook (`kind`)."""
+    def add_native_plugin(
+        self,
+        capsule: Any,
+        config: bytes,
+        priority: int,
+        scope: int,
+        keep: Any,
+    ) -> None:
+        """Load a `fulmen.plugin.v1` descriptor capsule and register its
+        native hooks under `scope` (§13.4) — each hook runs inline on the
+        dispatch thread, zero Python crossings. `config` is the plugin's
+        `config_json`; `keep` is held for the app's lifetime so the
+        plugin's code stays mapped. Raises `StartupError` on ABI mismatch
+        or a failed/panicking plugin `setup`."""
     def describe_routes(
         self,
     ) -> list[tuple[str, str, str, list[tuple[str, str, str]], list[str], int]]:

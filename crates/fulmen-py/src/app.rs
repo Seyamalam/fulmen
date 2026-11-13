@@ -8,18 +8,20 @@ use std::time::Duration;
 
 use fulmen_core::pipeline::resolve_hooks;
 use fulmen_core::{APP_SCOPE, AppDecl, CompiledApp, HookDecl, Method, Phase, RouteDecl};
+use fulmen_plugin_sdk::host::{HookArgs, HookOutcome, LoadedPlugin, ResponseMut};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyCapsule, PyTuple};
 
 use crate::aloop::{self, AsyncLoop};
+use crate::convert;
 use crate::convert::ErrorTable;
 use crate::descriptor::Descriptor;
 use crate::dispatch::{
     AppInner, CallSource, CallSpecArg, HandlerEntry, LaneDeps, MissingArg, ParamSchema,
     PyDispatcher, ResponseContract, ResponseVariant,
 };
-use crate::hooks::{HookEntry, NativeHook};
+use crate::hooks::{HookCx, HookDecision, HookEntry, NativeHook};
 use crate::pool::SyncPool;
 
 pyo3::create_exception!(
@@ -188,6 +190,10 @@ pub(crate) struct NativeApp {
     startup_hooks: Vec<LifecycleHook>,
     /// `@app.on_shutdown` registrations.
     shutdown_hooks: Vec<LifecycleHook>,
+    /// Loaded native plugins (§13.4): the instance plus the Python object
+    /// owning its shared library — both must outlive the declaration
+    /// phase, so [`compile_app`] clones them into `AppInner`.
+    native_plugins: Vec<(Arc<LoadedPlugin>, Py<PyAny>)>,
     /// `Fulmen(debug=True)` — §11.6 output validation; OR-ed with the
     /// serving-level `debug` flag at compile.
     pub(crate) debug: bool,
@@ -207,6 +213,7 @@ impl NativeApp {
             hook_seq: 0,
             startup_hooks: Vec::new(),
             shutdown_hooks: Vec::new(),
+            native_plugins: Vec::new(),
             debug,
         }
     }
@@ -256,6 +263,51 @@ impl NativeApp {
             name,
             HookKind::Python { callable, is_async },
         );
+        Ok(())
+    }
+
+    /// Load a native plugin's `fulmen.plugin.v1` descriptor capsule and
+    /// register its hooks (DESIGN.md §13.4): `capsule` carries the
+    /// `FulmenPluginV1` pointer, `config` the plugin's JSON config,
+    /// `priority`/`scope` order and scope the hooks like any other
+    /// registration, and `keep` is the Python object owning the shared
+    /// library (kept alive for the app's lifetime so the plugin's code
+    /// is never unmapped). Every hook runs inline — zero Python
+    /// crossings.
+    ///
+    /// # Errors
+    /// [`StartupError`] for an ABI mismatch or a plugin `setup` failure;
+    /// [`ValueError`] for a wrongly-named capsule.
+    fn add_native_plugin(
+        &mut self,
+        py: Python<'_>,
+        capsule: &Bound<'_, PyCapsule>,
+        config: &[u8],
+        priority: u16,
+        scope: u32,
+        keep: Py<PyAny>,
+    ) -> PyResult<()> {
+        // `pointer_checked` enforces the capsule name and non-null
+        // pointer; `LoadedPlugin::load` does every dereference, keeping
+        // all unsafe inside fulmen-plugin-sdk.
+        let pointer = capsule.pointer_checked(Some(fulmen_plugin_sdk::FULMEN_PLUGIN_CAPSULE))?;
+        let plugin = LoadedPlugin::load(pointer.cast())
+            .and_then(|plugin| {
+                plugin.create(config)?;
+                Ok(plugin)
+            })
+            .map_err(|err| StartupError::new_err(err.to_string()))?;
+        let logger = import_logger(py)?;
+        let plugin = Arc::new(plugin);
+        for phase in Phase::ALL {
+            if !plugin.has_hook(phase.index()) {
+                continue;
+            }
+            let name = format!("{}:{}", plugin.name(), phase.as_str());
+            let hook = plugin_hook(&plugin, &logger, phase);
+            self.add_native_hook(phase, &name, priority, scope, hook);
+        }
+        self.native_plugins.push((plugin, keep));
         Ok(())
     }
 
@@ -387,14 +439,11 @@ impl NativeApp {
         index_to_u32(self.hooks.len() - 1)
     }
 
-    /// Register a Rust-side native hook (security plugins, DI — M4+).
-    /// Runs inline on the dispatch thread: zero Python crossings.
+    /// Register a Rust-side native hook (loaded plugins — and, later,
+    /// security plugins and DI). Runs inline on the dispatch thread:
+    /// zero Python crossings.
     ///
-    /// Not reachable from Python — the plugin SDK calls it.
-    #[expect(
-        dead_code,
-        reason = "the M4 security plugin SDK registers through this API"
-    )]
+    /// Not reachable from Python — `add_native_plugin` calls it.
     pub(crate) fn add_native_hook(
         &mut self,
         phase: Phase,
@@ -645,6 +694,11 @@ pub(crate) fn compile_app(
             pool,
             async_loop,
             empty_contract: Arc::new(ResponseContract::default()),
+            native_plugins: native
+                .native_plugins
+                .iter()
+                .map(|(plugin, keep)| (Arc::clone(plugin), keep.clone_ref(py)))
+                .collect(),
         }),
         startup_hooks: native
             .startup_hooks
@@ -665,9 +719,51 @@ pub(crate) fn compile_app(
     })
 }
 
+/// The `NativeHook` bridging one loaded plugin phase into the pipeline
+/// (§13.4): `HookCx`'s borrows adapt to `HookArgs`, `run_hook` does the
+/// cross-ABI call inside the SDK's panic boundary, and a `Panicked`
+/// outcome logs and answers `500` — matching `call_native`'s own
+/// containment (§14.6).
+fn plugin_hook(plugin: &Arc<LoadedPlugin>, logger: &Arc<Py<PyAny>>, phase: Phase) -> NativeHook {
+    let plugin = Arc::clone(plugin);
+    let logger = Arc::clone(logger);
+    let plugin_name = plugin.name().to_owned();
+    let phase_index = phase.index();
+    Arc::new(move |cx: &mut HookCx<'_>| {
+        let mut args = HookArgs {
+            method: cx.method.as_str(),
+            path: cx.path,
+            query: cx.query,
+            headers: cx.headers,
+            body: cx.body,
+            remote_addr: cx.remote_addr,
+            response: cx.response.as_mut().map(|res| ResponseMut {
+                status: &mut res.status,
+                headers: &mut res.headers,
+                body: &mut res.body,
+            }),
+        };
+        match plugin.run_hook(phase_index, &mut args) {
+            HookOutcome::Continue => HookDecision::Continue,
+            HookOutcome::Respond(parts) => HookDecision::Respond(fulmen_server::Response {
+                status: parts.status,
+                headers: parts.headers,
+                body: parts.body,
+            }),
+            HookOutcome::Panicked(message) => {
+                crate::dispatch::log_message(
+                    &logger,
+                    format!("native plugin `{plugin_name}` {} hook: {message}", cx.phase),
+                );
+                HookDecision::Respond(convert::internal_error())
+            }
+        }
+    })
+}
+
 /// One `ErrorRegistration` → the compiled [`ErrorHandler`].
-fn error_entry(py: Python<'_>, registration: &ErrorRegistration) -> crate::convert::ErrorHandler {
-    crate::convert::ErrorHandler {
+fn error_entry(py: Python<'_>, registration: &ErrorRegistration) -> convert::ErrorHandler {
+    convert::ErrorHandler {
         class_: Arc::new(registration.class_.clone_ref(py)),
         handler: Arc::new(registration.handler.clone_ref(py)),
         is_async: registration.is_async,

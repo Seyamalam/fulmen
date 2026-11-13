@@ -60,6 +60,30 @@ exists. Move the `Unreleased` entries under the new version heading first.
   plugins refuse group use. Registration seals everywhere at compile:
   `use()`, late `ctx` registrations and mounted-group declarations all
   raise `RuntimeError` afterwards (§14.8).
+- Native plugins (M3.14–M3.17, M3.24, DESIGN.md §13.4): third-party
+  wheels can ship Rust middleware that runs in the native pipeline
+  without the GIL. `crates/fulmen-plugin-sdk` defines the safe surface —
+  the `FulmenPlugin` trait (`Send + Sync`, `&self` hooks for all eight
+  phases), borrowed `RequestView`/`ResponseView` types,
+  `Decision`/`PluginResponse`/`PluginError`, and `export_plugin!`, which
+  emits the `fulmen_plugin_v1` entry point plus panic-catching
+  trampolines so plugin crates write no `unsafe`. The versioned
+  `FulmenPluginDescriptorV1` C ABI travels in a `fulmen.plugin.v1`
+  `PyCapsule`: `app.use(fulmen.NativePlugin("libpath-or-module"), config)`
+  validates `abi_version`/`struct_size`, creates the instance from the
+  config's JSON, and registers each hooked phase as a `"{name}:{phase}"`
+  native hook under `PRIORITY_USER` (or the plugin's `priority`) — zero
+  Python crossings, so a native-only route still reports `cost: 1`.
+  Strings and headers cross as borrowed `(ptr, len)` slices; header and
+  response access goes through host vtable shims, `destroy` runs exactly
+  once, and `catch_unwind` on both sides of every call turns a panicking
+  hook into a 500 and a panicking `setup` into a `StartupError`. A
+  mismatched ABI fails with `expected N, found M`; unsafe is confined to
+  the SDK (`fulmen-py` extracts the capsule pointer with pyo3's safe
+  `pointer_checked`). `examples/native-plugin` (`RequestIdPlugin`) plus
+  SDK and end-to-end Python tests cover load, execution, mismatch and
+  panic paths; `cargo bench -p fulmen-bench native_plugin` measures
+  ~17 ns/hook of cross-ABI overhead.
 - `fulmen routes` (M3.4): lists `method path -> handler` from the
   compiled declarations; `--hooks` prints each route's resolved
   `(phase, name, kind)` hook chain plus scoped `on_error` entries,
