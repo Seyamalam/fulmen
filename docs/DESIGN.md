@@ -796,6 +796,13 @@ class Plugin(Protocol):
     def setup(self, ctx: PluginContext) -> object: ...   # return value = typed handle
 ```
 
+`app.use(plugin, config)` returns a `PluginHandle` immediately —
+`setup()` runs later, once the whole `use()` set has been resolved
+(§6.4.2), so the handle forwards attribute access to the plugin object
+(which is what lets `Annotated[auth.Claims, auth]` annotate at
+decoration time, §5.6) and exposes `setup()`'s return value as
+`handle.state` after compile.
+
 `PluginContext` lets a plugin:
 
 - add hooks for any phase in [§8](#8-request-lifecycle),

@@ -219,11 +219,11 @@ injection with scopes, adapter interfaces, native plugin SDK (unstable ABI),
 
 ### Plugins
 
-- [ ] M3.5 `Plugin` protocol, `PluginContext`, `app.use()` returning typed handles
-- [ ] M3.6 `requires`/`conflicts`, topological ordering, startup errors for missing/conflicting plugins
-- [ ] M3.7 Plugin configuration through `Settings` sections
-- [ ] M3.8 Plugins can add routes, providers, OpenAPI components, CLI commands, `check` rules
-- [x] M3.9 Hook registration closed after startup (runtime guardrail, DESIGN.md §14.8) — `Fulmen` seals every declaration at compile; late registration raises `RuntimeError`
+- [x] M3.5 `Plugin` protocol, `PluginContext`, `app.use()` returning typed handles — `fulmen.plugins.{Plugin,PluginContext,PluginHandle,CheckRule}`; `handle.state` is `setup()`'s return, attribute lookups forward to the plugin (§5.6 `Annotated[auth.Claims, auth]`)
+- [x] M3.6 `requires`/`conflicts`, topological ordering, startup errors for missing/conflicting plugins — `fulmen_core::plugins` resolver exposed as `_fulmen.resolve_plugin_order`; `use()` order ≠ execution order; missing/conflicts/cycles aggregate into one `StartupError`
+- [x] M3.7 Plugin configuration through `Settings` sections — `app.use(plugin, config, **kw)` delivers a read-only `ctx.config` mapping now; `[tool.fulmen.<name>]` sections bridge the same slot when M3.22 lands
+- [x] M3.8 Plugins can add routes, providers, OpenAPI components, CLI commands, `check` rules — `ctx.route|get|post|…|mount|on_error`, `ctx.providers`/`add_provider` (DI seam for M3.10), `ctx.add_openapi_component`, `ctx.cli_command` (`fulmen <cmd> <app>` dispatch), `ctx.check_rule` (`FUL-<NAME>-<NNN>`; the `check` runner itself is a later milestone)
+- [x] M3.9 Hook registration closed after startup (runtime guardrail, DESIGN.md §14.8) — `Fulmen` seals every declaration at compile (the whole tree, including plugin-mounted groups); `use()`, late `ctx` registrations and late hooks all raise `RuntimeError`
 
 ### Dependency injection
 

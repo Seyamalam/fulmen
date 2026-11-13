@@ -36,6 +36,30 @@ exists. Move the `Unreleased` entries under the new version heading first.
 - `@app.on_startup` / `@app.on_shutdown` lifecycle callbacks (§5.7):
   startup runs after a successful compile before bind (failures abort
   startup); shutdown runs once when the server stops (failures log).
+- Plugin system (M3.5–M3.9, DESIGN.md §13): `app.use(plugin, config, **kw)`
+  registers any object satisfying the `Plugin` protocol (`name`,
+  `version`, `requires`, `conflicts`, `setup(ctx)`) and returns a typed
+  `PluginHandle` — attribute lookups forward to the plugin so
+  `Annotated[auth.Claims, auth]` works at decoration time, and
+  `handle.state` is `setup()`'s return once the app compiles. `setup()`
+  runs at compile, not at `use()`: every `use()` in the app tree is
+  topologically sorted by `requires` (ties keep `use()` order) by the
+  native `resolve_plugin_order` resolver, and missing requirements,
+  declared conflicts and cycles aggregate into one `StartupError` —
+  `use()` order is never execution order. `PluginContext` mirrors the
+  app's registration surface: `ctx.route`/method decorators, `ctx.mount`,
+  `ctx.on_error`, all eight `ctx.<phase>` hook decorators plus
+  `on_startup`/`on_shutdown` (plugin hooks precede app hooks in each
+  phase), `ctx.providers`/`add_provider` as the M3.10 DI seam,
+  `ctx.add_openapi_component` (merged into the generated document),
+  `ctx.cli_command` (`fulmen <cmd> <app>` dispatch) and `ctx.check_rule`
+  (`FUL-<NAME>-<NNN>` rules for the future `fulmen check`). Plugin
+  configuration is a read-only per-plugin `ctx.config` mapping — the
+  seam `Settings` sections (M3.22) will feed typed slices into.
+  `group.use(plugin)` scopes contributions to the group; `scope="app"`
+  plugins refuse group use. Registration seals everywhere at compile:
+  `use()`, late `ctx` registrations and mounted-group declarations all
+  raise `RuntimeError` afterwards (§14.8).
 - `fulmen routes` (M3.4): lists `method path -> handler` from the
   compiled declarations; `--hooks` prints each route's resolved
   `(phase, name, kind)` hook chain plus scoped `on_error` entries,
