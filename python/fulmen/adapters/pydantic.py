@@ -720,6 +720,14 @@ class PydanticValidator:
     absent.
     """
 
+    @property
+    def conformance_types(self) -> tuple[Any, Any]:
+        """(supported, unsupported) probe pair for the testkit's
+        `Validator` suite (DESIGN.md §15.3)."""
+        pydantic = _require_pydantic()
+        model = pydantic.create_model("_ConformanceProbe", value=(int, ...))
+        return (model, int)
+
     def __init__(self) -> None:
         _require_pydantic()
 

@@ -379,6 +379,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fulmen-testkit"
+version = "0.2.0"
+dependencies = [
+ "fulmen-core",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"

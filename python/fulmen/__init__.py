@@ -77,16 +77,21 @@ from fulmen.settings import Secret, Settings
 from fulmen.types import Email, Raw, Url
 
 if typing.TYPE_CHECKING:
+    from fulmen.adapters.native import NativeValidator
     from fulmen.adapters.pydantic import PydanticValidator
 
 
 def __getattr__(name: str) -> object:
-    # Adapters stay lazy: `fulmen.PydanticValidator` resolves on first
+    # Adapters stay lazy: `fulmen.*Validator` resolves on first
     # access so `import fulmen` never pulls adapter code (or pydantic).
     if name == "PydanticValidator":
         from fulmen.adapters.pydantic import PydanticValidator
 
         return PydanticValidator
+    if name == "NativeValidator":
+        from fulmen.adapters.native import NativeValidator
+
+        return NativeValidator
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -132,6 +137,7 @@ __all__ = [
     "Model",
     "ModelConfig",
     "MultipleOf",
+    "NativeValidator",
     "NoContent",
     "NotAcceptable",
     "NotFound",

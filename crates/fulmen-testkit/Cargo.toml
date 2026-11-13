@@ -1,0 +1,16 @@
+[package]
+name = "fulmen-testkit"
+description = "Adapter conformance suites for Fulmen (DESIGN.md §15.3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+fulmen-core.workspace = true
+
+[lints]
+workspace = true

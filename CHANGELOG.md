@@ -68,6 +68,26 @@ exists. Move the `Unreleased` entries under the new version heading first.
 - Registration seals at compile (§14.8, M3.9): routes, hooks,
   `on_error` handlers, mounts and lifecycle callbacks registered after
   `run()`/`_compile_native()` raise `RuntimeError`.
+- Adapter interfaces + conformance testkit (§15, M3.18–M3.20): the five
+  infrastructure seams — `Validator`, `SessionStore`, `RateLimitStore`,
+  `CacheStore`, `JobQueue` — are Rust traits in
+  `fulmen-core::adapters` and `Protocol`s in
+  `fulmen.adapters.interfaces`, with shared `Rate`/`Decision`/`Job`/
+  `JobId` types and an `AdapterError` taxonomy (`NotFoundError`,
+  `StoreFullError`, `StoreUnavailableError`, `UnsupportedError`).
+  Built-in memory implementations ship in both languages:
+  `MemorySessionStore`/`MemoryCacheStore` (bounded LRU with lazy TTL),
+  `MemoryRateLimitStore` (GCRA — a denied `acquire` charges nothing and
+  reports `retry_after`), `MemoryJobQueue` (per-queue FIFO with
+  at-least-once delivery leases, `ack`/`nack`, `run_at`/`retry_at`
+  scheduling, `unique` dedup, `StoreFullError` backpressure), and
+  `NativeValidator` (the default `Validator`, spec-tree compiler).
+  `fulmen-testkit` provides per-interface conformance suites —
+  `suite(&dyn Trait)` functions on the Rust side, and on the Python
+  side a pytest plugin (`pytest --fulmen-adapter=pkg:Cls` runs only the
+  suites the adapter satisfies; `Validator` adapters declare
+  `conformance_types = (supported, unsupported)`). All built-ins pass
+  the full set.
 - `Settings` + `Secret` (M3.22, DESIGN.md §20): declare typed fields on
   a `Settings` subclass (`env_prefix`, `env_file`, `toml_file`,
   `toml_section` class arguments) and values resolve across sources —

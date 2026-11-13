@@ -37,6 +37,10 @@ pydantic = ["pydantic>=2.7"]
 [project.scripts]
 fulmen = "fulmen.cli:main"
 
+# `pytest --fulmen-adapter=pkg:Cls` conformance runner (DESIGN.md §15.3).
+[project.entry-points.pytest11]
+fulmen-testkit = "fulmen.testkit.plugin"
+
 [dependency-groups]
 dev = [
     "maturin>=1.16,<2.0",
@@ -74,6 +78,9 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "python/tests/**" = ["S101"]
+# The conformance suites are pytest test modules shipped inside the
+# package — same assert treatment as python/tests.
+"python/fulmen/testkit/suites/**" = ["S101"]
 "python/fulmen/cli.py" = ["T201"]
 "scripts/**" = ["T201", "S603", "S607"]
 "benches/**" = ["T201", "S603", "S607"]
@@ -89,5 +96,8 @@ show_missing = true
 
 [tool.pyright]
 include = ["python/fulmen", "python/tests/typing", "scripts"]
+# pytest-facing code — pytest isn't resolvable in pyright's env here,
+# same class as python/tests (which is outside `include`).
+exclude = ["python/fulmen/testkit"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

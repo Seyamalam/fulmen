@@ -241,9 +241,9 @@ injection with scopes, adapter interfaces, native plugin SDK (unstable ABI),
 
 ### Adapters
 
-- [ ] M3.18 Interfaces as Rust traits and Python protocols: `Validator`, `SessionStore`, `RateLimitStore`, `CacheStore`, `JobQueue`
-- [ ] M3.19 Memory implementations of each (defaults)
-- [ ] M3.20 `fulmen-testkit` conformance suites; built-ins must pass them
+- [x] M3.18 Interfaces as Rust traits and Python protocols: `Validator`, `SessionStore`, `RateLimitStore`, `CacheStore`, `JobQueue`
+- [x] M3.19 Memory implementations of each (defaults)
+- [x] M3.20 `fulmen-testkit` conformance suites; built-ins must pass them
 
 ### Testing
 
