@@ -17,6 +17,8 @@ from fulmen import (
     Fulmen,
     Header,
     NotFound,
+    Query,
+    Raw,
     Redirect,
     Request,
     Response,
@@ -382,3 +384,107 @@ def test_async_raise_server_errors() -> None:
                 await client.get("/boom")
 
     asyncio.run(main())
+
+
+# -- internals: capture fallback, request prep edges --------------------------------
+
+
+def test_capture_renders_problem_responses() -> None:
+    """`_capture` mirrors `problem_for` — `HTTPError` without a marker,
+    anything else stashed behind the marker header."""
+    from fulmen.testing import _CAPTURE_HEADER, _capture
+
+    response = _capture(NotFound(detail="gone"))
+    assert response.status == 404
+    assert response.content_type == "application/problem+json"
+    assert _CAPTURE_HEADER not in response.headers
+
+    before = len(__import__("fulmen.testing", fromlist=["_CAPTURED"])._CAPTURED)
+    response = _capture(RuntimeError("boom"))
+    assert response.status == 500
+    marker = response.headers[_CAPTURE_HEADER]
+    assert int(marker) == before
+
+
+def test_stop_before_start_is_a_noop() -> None:
+    client = TestClient(_app())
+    client.stop()  # never started — nothing to shut down
+
+
+def test_send_without_start_raises() -> None:
+    client = TestClient(_app())
+    with pytest.raises(RuntimeError, match="request before start"):
+        client._send("GET", "/", None, {}, False, 0)
+
+
+def test_absolute_url_on_this_server() -> None:
+    """An absolute URL to the client's own host is split to path+query."""
+    with TestClient(_app()) as client:
+        response = client.get(f"{client.base_url}/users/3?ignored=1")
+        assert response.status == 200
+        assert response.json() == {"id": 3, "name": "Ada"}
+
+
+def test_params_as_pair_list_repeats_keys() -> None:
+    app = Fulmen(openapi_url=None, docs_url=None)
+
+    @app.get("/pairs")
+    def pairs(q: Query[list[str]]) -> list[str]:
+        return q
+
+    with TestClient(app) as client:
+        response = client.get("/pairs", params=[("q", "a"), ("q", "b")])
+        assert response.json() == ["a", "b"]
+
+
+def test_explicit_cookie_header_merges_with_client_cookies() -> None:
+    app = Fulmen(openapi_url=None, docs_url=None)
+
+    @app.get("/cookies")
+    def cookies(request: Request) -> dict:
+        return {"cookie": request.headers.get("cookie", "")}
+
+    with TestClient(app, cookies={"session": "s1"}) as client:
+        response = client.get("/cookies", headers={"Cookie": "extra=e2"})
+        assert response.json()["cookie"] == "extra=e2; session=s1"
+
+
+def test_bytes_data_posts_as_is() -> None:
+    app = Fulmen(openapi_url=None, docs_url=None)
+
+    @app.post("/raw")
+    def raw(body: Raw) -> dict:
+        return {"length": len(body)}
+
+    with TestClient(app) as client:
+        assert client.post("/raw", data=b"\x00\x01\x02").json() == {"length": 3}
+
+
+def test_redirect_location_with_query_is_followed() -> None:
+    app = Fulmen(openapi_url=None, docs_url=None)
+
+    @app.get("/old")
+    def old() -> Redirect:
+        return Redirect("/new?from=old")
+
+    @app.get("/new")
+    def new(from_: Annotated[str, Query(alias="from")]) -> dict:
+        return {"from": from_}
+
+    with TestClient(app) as client:
+        assert client.get("/old").json() == {"from": "old"}
+
+
+def test_async_client_properties() -> None:
+    client = AsyncTestClient(_app())
+    assert client.app is not None
+    assert client.raise_server_errors is True
+    assert client.base_url == ""  # not started yet
+
+
+def test_absolute_url_without_query() -> None:
+    """An absolute URL with no query still splits to just the path."""
+    with TestClient(_app()) as client:
+        response = client.get(f"{client.base_url}/users/3")
+        assert response.status == 200
+        assert response.json() == {"id": 3, "name": "Ada"}

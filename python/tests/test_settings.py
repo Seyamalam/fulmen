@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated
 
 import pytest
-from fulmen import Alias, Field, Fulmen, Header, Secret, Settings, StartupError
+from fulmen import Alias, Field, Fulmen, Header, Model, Secret, Settings, StartupError
 from fulmen._typing import AnnotationError
 from fulmen.testing import TestClient
 
@@ -56,6 +56,14 @@ class _OtherSettings(Settings, env_prefix="TS_OTH_"):
 
 class _AsyncSettings(Settings, env_prefix="TS_ASYNC_"):
     value: int = 11
+
+
+class _FwdRefSettings(Settings, env_prefix="TS_FWD_"):
+    inner: "_FwdInner"  # noqa: UP037 -- deliberate string forward reference
+
+
+class _FwdInner(Model):
+    value: int = 5
 
 
 def test_secret_never_leaks(caplog: pytest.LogCaptureFixture) -> None:
@@ -457,3 +465,252 @@ def test_settings_survive_async_handlers() -> None:
 
     with TestClient(app) as client:
         assert client.get("/a").text == "11"
+
+
+# -- Secret[T] hint shapes -------------------------------------------------------
+
+
+def test_bare_secret_annotation() -> None:
+    """A bare `Secret` (no type argument) masks like `Secret[Any]`."""
+
+    class S(Settings, env_prefix="TS_BARESEC_"):
+        token: Secret = Secret("default")
+
+    settings = S(_environ={"TS_BARESEC_TOKEN": "abc123"})
+    assert settings.token.get_secret_value() == "abc123"
+    assert "abc123" not in repr(settings.token)
+
+
+def test_secret_requires_one_argument() -> None:
+    """`Secret` is single-parameter — the typing machinery itself rejects
+    `Secret[int, str]` before `_unsecret` sees it."""
+    with pytest.raises(TypeError, match="Too many arguments"):
+
+        class _Bad(Settings, env_prefix="TS_SECN_"):
+            key: Secret[int, str]
+
+
+def test_optional_secret_unwraps() -> None:
+    class S(Settings, env_prefix="TS_OPTSEC_"):
+        key: Secret[int] | None = None
+
+    assert S(_environ={}).key is None
+    assert S(_environ={"TS_OPTSEC_KEY": "7"}).key.get_secret_value() == 7
+
+
+def test_secret_inside_a_wider_union_is_rejected() -> None:
+    """`Secret[T] | U` is a nested secret — the same `whole field`
+    rejection as `list[Secret[T]]`."""
+
+    with pytest.raises(AnnotationError, match="whole field"):
+
+        class _Bad(Settings, env_prefix="TS_UNSEC_"):
+            key: Secret[int] | str = "x"
+
+
+def test_plain_optional_field_is_not_secret() -> None:
+    class S(Settings, env_prefix="TS_PLAINOPT_"):
+        plain: int | None = None
+
+    settings = S(_environ={})
+    assert settings.plain is None
+    assert S(_environ={"TS_PLAINOPT_PLAIN": "3"}).plain == 3
+
+
+# -- loading edges ----------------------------------------------------------------
+
+
+def test_forward_ref_settings_compile_lazily() -> None:
+    """A `Settings` class declared before its field type (module level)
+    compiles lazily on first use — `_FwdRefSettings` above references
+    `_FwdInner`, defined after it."""
+    settings = _FwdRefSettings(inner=_FwdInner(value=9), _environ={})
+    assert settings.inner.value == 9
+
+
+def test_unreadable_toml_is_a_problem(tmp_path) -> None:
+    bad = tmp_path / "fulmen.toml"
+    bad.write_text("not = [valid")
+
+    class S(Settings, env_prefix="TS_BADTOML_", toml_file=bad):
+        x: int = 0
+
+    with pytest.raises(StartupError, match="cannot read"):
+        S(_environ={})
+
+
+def test_missing_env_file_is_silently_empty(tmp_path) -> None:
+    class S(Settings, env_prefix="TS_NOENV_"):
+        x: int = 3
+
+    settings = S(_env_file=tmp_path / "absent.env", _environ={})
+    assert settings.x == 3
+
+
+def test_unreadable_env_file_is_silently_empty(tmp_path) -> None:
+    env_file = tmp_path / "unreadable.env"
+    env_file.write_text("X=1")
+    env_file.chmod(0)
+
+    class S(Settings, env_prefix="TS_UNREAD_"):
+        x: int = 4
+
+    try:
+        settings = S(_env_file=env_file, _environ={})
+    finally:
+        env_file.chmod(0o644)
+    assert settings.x == 4
+
+
+def test_dotenv_line_without_key_is_skipped(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("=orphaned\nTS_DOT_X=8\n")
+
+    class S(Settings, env_prefix="TS_DOT_", env_file=env_file):
+        x: int = 0
+
+    assert S(_environ={}, _toml_file=None).x == 8
+
+
+def test_non_json_env_container_falls_back_to_raw() -> None:
+    """JSON-looking fields (`dict`/`list`) accept a non-JSON raw string
+    and let validation complain — the raw survives `_coerce`."""
+
+    class S(Settings, env_prefix="TS_JSON_"):
+        mapping: dict[str, int]
+
+    with pytest.raises(StartupError):
+        S(_environ={"TS_JSON_MAPPING": "not-json"})
+    settings = S(_environ={"TS_JSON_MAPPING": '{"a": 1}'})
+    assert settings.mapping == {"a": 1}
+
+
+def test_env_prefix_must_be_a_str() -> None:
+    class S(Settings, env_prefix="TS_EPR_"):
+        x: int = 0
+
+    with pytest.raises(TypeError, match="env_prefix must be a str"):
+        S(_env_prefix=42, _environ={})
+
+
+def test_unmapped_error_loc_names_the_settings() -> None:
+    """A validation entry whose `loc` resolves to a *nested* field (not a
+    declared settings field) still reports with its full location."""
+
+    class S(Settings, env_prefix="TS_UNMAP_"):
+        inner: _FwdInner
+
+    with pytest.raises(StartupError) as excinfo:
+        S(inner={"value": "not-an-int"}, _environ={})
+    assert "failed to load" in str(excinfo.value)
+    assert "inner/value" in str(excinfo.value)
+
+
+def test_error_message_lists_checked_sources(tmp_path) -> None:
+    """Field problems name every source checked — env, dotenv, toml."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    toml_file = tmp_path / "fulmen.toml"
+    toml_file.write_text("[tool.fulmen]\n")
+
+    class S(Settings, env_prefix="TS_SRC_", env_file=env_file, toml_file=toml_file):
+        required: str
+
+    with pytest.raises(StartupError) as raised:
+        S(_environ={})
+    message = str(raised.value)
+    assert "dotenv" in message
+    assert "fulmen.toml" in message
+
+
+# -- settings-parameter compile checks (§20) ---------------------------------------
+
+
+def test_settings_param_cannot_be_positional_only() -> None:
+    app = Fulmen(openapi_url=None, docs_url=None)
+
+    @app.get("/bad")
+    def bad(settings: _MarkerSettings, /) -> str:
+        return "x"
+
+    with pytest.raises(StartupError, match="cannot be positional-only"):
+        app._compile_native()
+
+
+def test_settings_load_failure_is_a_startup_problem() -> None:
+    """A foreign `Settings` class that fails construction surfaces as an
+    aggregated startup problem, not a stray exception."""
+    app = Fulmen(openapi_url=None, docs_url=None)
+
+    @app.get("/bad")
+    def bad(settings: _FailSettings) -> str:
+        return "x"
+
+    with pytest.raises(StartupError, match="required"):
+        app._compile_native()
+
+
+def test_same_foreign_settings_class_shares_the_cache() -> None:
+    """Two routes declaring the same foreign `Settings` class share one
+    resolved instance (the `_settings_cache` hit path)."""
+    app = Fulmen(openapi_url=None, docs_url=None)
+
+    @app.get("/a")
+    def a(settings: _OtherSettings) -> int:
+        return id(settings)
+
+    @app.get("/b")
+    def b(settings: _OtherSettings) -> int:
+        return id(settings)
+
+    with TestClient(app) as client:
+        assert client.get("/a").json() == client.get("/b").json()
+
+
+def test_injected_settings_wrapper_runs_handler() -> None:
+    """The injected-settings wrapper is a plain closure — calling the
+    compiled spec's handler exercises it off the dispatch path."""
+    app = Fulmen(openapi_url=None, docs_url=None)
+
+    @app.get("/sync")
+    def sync_handler(q: str, settings: _OtherSettings) -> str:
+        return f"{q}:{settings.value}"
+
+    @app.get("/async")
+    async def async_handler(settings: _OtherSettings) -> int:
+        return settings.value
+
+    specs, problems = app._route_specs({})
+    assert problems == []
+    sync_spec = next(spec for spec, _m, _l in specs if spec[1] == "/sync")
+    async_spec = next(spec for spec, _m, _l in specs if spec[1] == "/async")
+    wrapped = sync_spec[4]
+    assert wrapped(q="hi") == "hi:7"
+
+    import asyncio
+
+    assert asyncio.run(async_spec[4]()) == 7
+
+
+def test_toml_non_table_sections_collapse_to_empty(tmp_path) -> None:
+    """A `[tool.fulmen]` leaf that isn't a table reads as no settings."""
+    toml_file = tmp_path / "fulmen.toml"
+    toml_file.write_text('tool = "scalar"\n')
+
+    class S(Settings, env_prefix="TS_NT_", toml_file=toml_file):
+        x: int = 1
+
+    assert S(_environ={}).x == 1
+
+
+def test_error_message_without_toml_omits_the_toml_source(tmp_path) -> None:
+    """With `toml_file=None` the checked-sources line skips toml."""
+
+    class S(Settings, env_prefix="TS_NOTOML_", toml_file=None):
+        required: str
+
+    with pytest.raises(StartupError) as raised:
+        S(_environ={}, _toml_file=None)
+    message = str(raised.value)
+    assert "checked:" in message
+    assert "fulmen.toml" not in message

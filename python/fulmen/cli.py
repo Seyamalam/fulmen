@@ -207,5 +207,5 @@ def _load_app(spec: str) -> Fulmen:
     return obj
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover -- exercised via `python -m fulmen.cli` subprocess
     raise SystemExit(main())

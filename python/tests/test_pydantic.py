@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import json
 import sys
+import typing
 from collections.abc import Callable
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 
 import pytest
 from conftest import fetch
-from fulmen import Body, Fulmen
+from fulmen import Body, Fulmen, Len
 from fulmen._typing import AnnotationError, SpecBuilder
 from fulmen.adapters.pydantic import PydanticValidator, is_pydantic_model
 from fulmen.errors import ValidationError
@@ -585,3 +586,738 @@ def test_startup_error_on_unsupported_model() -> None:
 
     with pytest.raises(StartupError, match="SecretStr"):
         app._compile_native()
+
+
+# ---- adapter edge coverage -----------------------------------------------------
+# ---- adapter edge coverage ------------------------------------------------------
+#
+# Models here are module-level: materializing a `desc.validate` result resolves
+# the class by `module:qualname`, which cannot reach `<locals>` classes.
+
+
+class _OpaqueCallable:
+    """A callable `inspect.signature` can't introspect."""
+
+    @property
+    def __signature__(self) -> object:
+        raise ValueError("no signature")
+
+    def __call__(self, v: int) -> int:
+        return v + 1
+
+
+class OpaqueAfterMeta(BaseModel):
+    x: Annotated[int, PydAfterValidator(_OpaqueCallable())]
+
+
+from pydantic.types import Strict as _PydStrict  # noqa: E402
+
+
+class StrictMetaField(BaseModel):
+    x: Annotated[int, _PydStrict()]
+
+
+class NestedStrictMeta(BaseModel):
+    xs: list[Annotated[int, _PydStrict()]]
+
+
+class FulmenMarkerMeta(BaseModel):
+    x: Annotated[list[int], Len(min=1)]
+
+
+class NestedFulmenMarkerMeta(BaseModel):
+    xs: list[Annotated[str, Len(min=2)]]
+
+
+class _FakeDiscriminator:
+    """Duck-typed `pydantic.Discriminator` — the adapter reads by name."""
+
+    discriminator = "kind"
+
+
+_FakeDiscriminator.__name__ = "Discriminator"
+
+
+class _FakeDiscriminatorFn:
+    discriminator = staticmethod(lambda v: "kind")
+
+
+_FakeDiscriminatorFn.__name__ = "Discriminator"
+
+
+class TaggedUnionHolder(BaseModel):
+    pet: Annotated[CatModel | DogModel, _FakeDiscriminator()]
+
+
+class BadTaggedUnion(BaseModel):
+    pet: Annotated[CatModel | DogModel, _FakeDiscriminatorFn()]
+
+
+class StringConsField(BaseModel):
+    x: Annotated[
+        str,
+        pydantic.StringConstraints(strip_whitespace=True, to_lower=True, min_length=1),
+    ]
+
+
+class NestedStringConsField(BaseModel):
+    xs: list[
+        Annotated[
+            str,
+            pydantic.StringConstraints(strip_whitespace=True, to_lower=True),
+        ]
+    ]
+
+
+class UnionMemberAnnotated(BaseModel):
+    x: Annotated[str, pydantic.StringConstraints(to_lower=True)] | int
+
+
+class DictArgAnnotated(BaseModel):
+    m: dict[str, Annotated[str, pydantic.StringConstraints(to_lower=True)]]
+
+
+class NestedAfterMeta(BaseModel):
+    xs: list[Annotated[int, PydAfterValidator(lambda v: v + 1)]]
+
+
+class NoneReturningValidator(BaseModel):
+    x: int
+
+    @model_validator(mode="after")
+    def check(self) -> None:
+        return None
+
+
+class ConstrainedRoot(RootModel[int]):
+    root: int = Field(gt=0)
+
+
+def test_one_arg_rejects_info_signature() -> None:
+    """A `(value, info)`-shape validator can't run — no ValidationInfo."""
+
+    def with_info(v: int, info: object) -> int:
+        return v
+
+    class M(BaseModel):
+        x: Annotated[int, PydAfterValidator(with_info)]
+
+    with pytest.raises(AnnotationError, match="ValidationInfo"):
+        PydanticValidator().compile(M)
+
+
+def test_one_arg_passes_uninspectable_callables() -> None:
+    """Callables whose signature raises are called optimistically."""
+    desc = PydanticValidator().compile(OpaqueAfterMeta)
+    assert desc.validate({"x": 1}).x == 2
+
+
+def test_pydantic_field_type_kinds() -> None:
+    """`AnyUrl`/`Strict*`/path types map to spec kinds."""
+    import pathlib
+
+    class M(BaseModel):
+        url: pydantic.AnyUrl
+        strict_i: pydantic.StrictInt
+        strict_s: pydantic.StrictStr
+        strict_f: pydantic.StrictFloat
+        strict_b: pydantic.StrictBool
+        local: pathlib.Path
+
+    spec = PydanticValidator.spec(M)
+    fields = {f["name"]: f["type"] for f in spec["fields"]}
+    assert fields["url"]["kind"] == "url"
+    assert fields["strict_i"]["kind"] == "int"
+    assert fields["strict_s"]["kind"] == "str"
+    assert fields["strict_f"]["kind"] == "float"
+    assert fields["strict_b"]["kind"] == "bool"
+    assert fields["local"]["kind"] == "str"
+
+
+def test_top_level_pydantic_type_annotation() -> None:
+    """A mapped pydantic type as a bare annotation hits the special hook."""
+    builder = SpecBuilder()
+    assert builder.type_spec(pydantic.EmailStr, "t")["kind"] == "email"
+    assert builder.type_spec(pydantic.AnyUrl, "t")["kind"] == "url"
+
+
+def test_file_path_field_rejects_unsupported_metadata() -> None:
+    """`FilePath` carries a `PathType` metadata item the IR can't express —
+    the adapter raises rather than silently dropping the exists-check."""
+
+    class M(BaseModel):
+        path: pydantic.FilePath
+
+    with pytest.raises(AnnotationError, match="unsupported pydantic metadata"):
+        PydanticValidator.spec(M)
+
+
+def test_metadata_error_treatments() -> None:
+    """`WrapValidator`/`PlainValidator`/`SkipValidation` raise at spec build."""
+    from pydantic.functional_validators import PlainValidator, WrapValidator
+
+    class W(BaseModel):
+        x: Annotated[int, WrapValidator(lambda v, h: v)]
+
+    with pytest.raises(AnnotationError, match="WrapValidator"):
+        PydanticValidator.spec(W)
+
+    class P(BaseModel):
+        x: Annotated[int, PlainValidator(lambda v: v)]
+
+    with pytest.raises(AnnotationError, match="PlainValidator"):
+        PydanticValidator.spec(P)
+
+    class S(BaseModel):
+        x: Annotated[int, pydantic.SkipValidation()]
+
+    with pytest.raises(AnnotationError, match="SkipValidation"):
+        PydanticValidator.spec(S)
+
+
+def test_nested_wrap_validator_raises() -> None:
+    from pydantic.functional_validators import WrapValidator
+
+    class M(BaseModel):
+        xs: list[Annotated[int, WrapValidator(lambda v, h: v)]]
+
+    with pytest.raises(AnnotationError, match="WrapValidator"):
+        PydanticValidator.spec(M)
+
+
+def test_strict_metadata_is_a_noop() -> None:
+    desc = PydanticValidator().compile(StrictMetaField)
+    assert desc.validate({"x": 1}).x == 1
+
+
+def test_nested_strict_noop() -> None:
+    desc = PydanticValidator().compile(NestedStrictMeta)
+    assert desc.validate({"xs": [1]}).xs == [1]
+
+
+def test_fulmen_markers_inside_pydantic_annotated() -> None:
+    """Fulmen markers mixed into `Annotated` pass through `apply_markers`."""
+    desc = PydanticValidator().compile(FulmenMarkerMeta)
+    assert desc.validate({"x": [1]}).x == [1]
+    with pytest.raises(ValidationError):
+        desc.validate({"x": []})
+
+
+def test_nested_fulmen_marker_in_annotated() -> None:
+    """Fulmen `Len` inside a nested `Annotated` is kept verbatim."""
+    spec = PydanticValidator.spec(NestedFulmenMarkerMeta)
+    item = spec["fields"][0]["type"]["item"]
+    assert item["len"] == {"min": 2}
+
+
+def test_discriminator_metadata_marker() -> None:
+    """A `Discriminator`-named metadata item with a str tag applies."""
+    desc = PydanticValidator().compile(TaggedUnionHolder)
+    obj = desc.validate({"pet": {"kind": "dog"}})
+    assert isinstance(obj.pet, DogModel)
+
+
+def test_discriminator_callable_tag_rejected() -> None:
+    """A callable `discriminator` (pydantic's own shape) can't name a field."""
+    with pytest.raises(AnnotationError, match="needs a field name"):
+        PydanticValidator.spec(BadTaggedUnion)
+
+
+def test_string_constraints_transforms() -> None:
+    """`StringConstraints` folds strip/lower into the spec."""
+    desc = PydanticValidator().compile(StringConsField)
+    assert desc.validate({"x": "  AB "}).x == "ab"
+
+
+def test_unsupported_metadata_attrs_raise() -> None:
+    """`decimal_places`/`allow_inf_nan` can't map to the IR."""
+    from decimal import Decimal
+
+    class D(BaseModel):
+        x: Decimal = Field(decimal_places=2)
+
+    with pytest.raises(AnnotationError, match="decimal_places"):
+        PydanticValidator.spec(D)
+
+    class F(BaseModel):
+        x: float = Field(allow_inf_nan=True)
+
+    with pytest.raises(AnnotationError, match="allow_inf_nan"):
+        PydanticValidator.spec(F)
+
+    class F2(BaseModel):
+        x: float = Field(allow_inf_nan=False)
+
+    # Even a False flag is an unconsumed pydantic marker — still an error.
+    with pytest.raises(AnnotationError, match="unsupported pydantic metadata"):
+        PydanticValidator.spec(F2)
+
+
+def test_unknown_pydantic_metadata_raises() -> None:
+    import annotated_types
+
+    class M(BaseModel):
+        x: Annotated[int, annotated_types.Predicate(lambda v: True)]
+
+    with pytest.raises(AnnotationError, match="unsupported pydantic metadata"):
+        PydanticValidator.spec(M)
+
+
+def test_nested_field_info_metadata() -> None:
+    """`Field(...)` inside a nested `Annotated` converts doc attrs + ge."""
+
+    class M(BaseModel):
+        xs: list[Annotated[int, Field(ge=2, description="an item", examples=[3], deprecated=True)]]
+
+    spec = PydanticValidator.spec(M)
+    item = spec["fields"][0]["type"]["item"]
+    assert item["meta"]["description"] == "an item"
+    assert item["meta"]["example"] == 3
+    assert item["meta"]["deprecated"] is True
+    assert item["range"]["ge"] == 2
+
+
+def test_nested_discriminator_field_info() -> None:
+    """`Field(discriminator=...)` nested inside a container sets the tag."""
+
+    class M(BaseModel):
+        pets: list[Annotated[CatModel | DogModel, Field(discriminator="kind")]]
+
+    spec = PydanticValidator.spec(M)
+    item = spec["fields"][0]["type"]["item"]
+    assert item["tag"] == "kind"
+
+
+def test_nested_annotated_marker_conversions() -> None:
+    """Nested `annotated_types` metadata become Fulmen markers."""
+    import annotated_types
+
+    class M(BaseModel):
+        xs: list[
+            Annotated[
+                int,
+                annotated_types.Gt(0),
+                annotated_types.Le(9),
+                annotated_types.MultipleOf(3),
+            ]
+        ]
+
+    spec = PydanticValidator.spec(M)
+    item = spec["fields"][0]["type"]["item"]
+    assert item["range"] == {"gt": 0, "le": 9}
+    assert item["multiple_of"] == 3
+
+
+def test_nested_min_max_len_and_pattern() -> None:
+    class M(BaseModel):
+        xs: list[
+            Annotated[
+                str,
+                pydantic.StringConstraints(min_length=2, pattern="^a"),
+            ]
+        ]
+
+    spec = PydanticValidator.spec(M)
+    item = spec["fields"][0]["type"]["item"]
+    assert item["len"] == {"min": 2}
+    assert item["pattern"] == "^a"
+
+
+def test_nested_transforms() -> None:
+    spec = PydanticValidator.spec(NestedStringConsField)
+    item = spec["fields"][0]["type"]["item"]
+    assert item["meta"]["transforms"] == {"strip": True, "lower": True}
+
+
+def test_nested_unsupported_attrs_raise() -> None:
+    from decimal import Decimal
+
+    class M(BaseModel):
+        xs: list[Annotated[Decimal, Field(decimal_places=2)]]
+
+    with pytest.raises(AnnotationError, match="decimal_places"):
+        PydanticValidator.spec(M)
+
+    class F(BaseModel):
+        xs: list[Annotated[float, Field(allow_inf_nan=True)]]
+
+    with pytest.raises(AnnotationError, match="allow_inf_nan"):
+        PydanticValidator.spec(F)
+
+
+def test_nested_unknown_marker_raises() -> None:
+    import annotated_types
+
+    class M(BaseModel):
+        xs: list[Annotated[int, annotated_types.Predicate(lambda v: True)]]
+
+    with pytest.raises(AnnotationError, match="unsupported pydantic metadata"):
+        PydanticValidator.spec(M)
+
+
+def test_nested_after_validator_marker() -> None:
+    desc = PydanticValidator().compile(NestedAfterMeta)
+    assert desc.validate({"xs": [1]}).xs == [2]
+
+
+def test_rewrite_hint_rebuilds_unions() -> None:
+    """A union whose members rewrite (Annotated inside) is reassembled."""
+    desc = PydanticValidator().compile(UnionMemberAnnotated)
+    assert desc.validate({"x": "AB"}).x == "ab"
+    assert desc.validate({"x": 5}).x == 5
+
+
+def test_rewrite_hint_copy_with_containers() -> None:
+    """`dict[str, Annotated[...]]` rewrites args through `copy_with`."""
+    desc = PydanticValidator().compile(DictArgAnnotated)
+    assert desc.validate({"m": {"a": "AB"}}).m == {"a": "ab"}
+
+
+def test_undefined_default_is_required() -> None:
+    """A duck-typed `PydanticUndefined` default resolves to `required`."""
+    from fulmen.adapters.pydantic import model_spec
+
+    class PydanticUndefined:
+        pass
+
+    class M(BaseModel):
+        x: int = Field(default=PydanticUndefined())
+
+    spec = model_spec(SpecBuilder(), M, "annotation")
+    assert spec["fields"][0]["missing"] == "required"
+
+
+def test_non_scalar_default_gets_deepcopy_factory() -> None:
+    class M(BaseModel):
+        xs: list[int] = [1, 2]
+
+    spec = PydanticValidator.spec(M)
+    assert "factory" in spec["fields"][0]["missing"]
+
+
+def test_serialization_alias_with_alias() -> None:
+    """`alias` + a distinct `serialization_alias` — the wire name is the
+    validation alias (pydantic mirrors `alias` into it)."""
+
+    class M(BaseModel):
+        x: int = Field(alias="wire", serialization_alias="out")
+
+    spec = PydanticValidator.spec(M)
+    assert spec["fields"][0]["alias"] == "wire"
+
+
+def test_alias_generator_callable_and_object() -> None:
+    """`alias_generator` accepts a callable or an `AliasGenerator`."""
+
+    class C(BaseModel):
+        model_config = ConfigDict(alias_generator=str.upper)
+        user_name: str
+
+    spec = PydanticValidator.spec(C)
+    assert spec["fields"][0]["alias"] == "USER_NAME"
+
+    from pydantic.aliases import AliasGenerator
+
+    class G(BaseModel):
+        model_config = ConfigDict(alias_generator=AliasGenerator(validation_alias=str.lower))
+        UserName: str
+
+    spec = PydanticValidator.spec(G)
+    assert spec["fields"][0]["alias"] == "username"
+
+
+def test_model_config_str_flags() -> None:
+    class M(BaseModel):
+        model_config = ConfigDict(
+            str_strip_whitespace=True,
+            str_to_lower=False,
+            str_to_upper=True,
+            str_min_length=1,
+            str_max_length=9,
+        )
+        x: str
+
+    spec = PydanticValidator.spec(M)
+    node = spec["fields"][0]["type"]
+    assert node["meta"]["transforms"] == {"strip": True, "upper": True}
+    assert node["len"] == {"min": 1, "max": 9}
+
+
+def test_field_doc_metadata() -> None:
+    class M(BaseModel):
+        x: int = Field(description="the x", examples=[7], deprecated=True, title="X")
+
+    spec = PydanticValidator.spec(M)
+    meta = spec["fields"][0]["meta"]
+    assert meta["description"] == "the x"
+    assert meta["example"] == 7
+    assert meta["deprecated"] is True
+    assert meta["title"] == "X"
+
+
+def test_model_validator_returning_none_keeps_obj() -> None:
+    desc = PydanticValidator().compile(NoneReturningValidator)
+    assert desc.validate({"x": 1}).x == 1
+
+
+def test_decorators_absent_on_ducktyped_model() -> None:
+    """A duck-typed model without `__pydantic_decorators__` specs fine."""
+    from fulmen.adapters.pydantic import model_spec
+
+    class Fake:
+        model_fields: ClassVar[dict] = {}
+        model_config: ClassVar[dict] = {}
+        __pydantic_serializer__ = object()
+
+    spec = model_spec(SpecBuilder(), Fake, "annotation")
+    assert spec["kind"] == "record"
+    assert spec["fields"] == []
+
+
+def test_function_local_model_specs() -> None:
+    """`<locals>` qualnames skip the resolvable-binding step."""
+
+    class LocalModel(BaseModel):
+        x: int
+
+    spec = PydanticValidator.spec(LocalModel)
+    assert spec["kind"] == "record"
+
+
+def test_unresolvable_parent_qualname() -> None:
+    """A qualname whose intermediate name isn't bound just skips."""
+    ghost = type("Ghost", (BaseModel,), {"__annotations__": {"x": int}})
+    ghost.__qualname__ = "NoSuchOuter.Ghost"
+    spec = PydanticValidator.spec(ghost)
+    assert spec["class"]["name"] == "NoSuchOuter.Ghost"
+
+
+def test_unsupported_extra_config_raises() -> None:
+    class M(BaseModel):
+        x: int
+
+    original = M.model_config
+    M.model_config = {"extra": "unlisted-policy"}
+    try:
+        with pytest.raises(AnnotationError, match="extra="):
+            PydanticValidator.spec(M)
+    finally:
+        M.model_config = original
+
+
+def test_root_model_with_constraints() -> None:
+    desc = PydanticValidator().compile(ConstrainedRoot)
+    assert desc.validate(3).root == 3
+    with pytest.raises(ValidationError):
+        desc.validate(-1)
+
+
+def test_spec_and_compile_reject_non_models() -> None:
+    adapter = PydanticValidator()
+    with pytest.raises(AnnotationError, match="not a pydantic"):
+        adapter.spec(int)
+    with pytest.raises(AnnotationError, match="not a pydantic"):
+        adapter.compile(int)
+
+
+def test_json_schema_includes_components() -> None:
+    schema = PydanticValidator().json_schema(HasPet)
+    assert "components" in schema
+    assert "CatModel" in schema["components"]["schemas"]
+
+
+class _NestedTagFn:
+    discriminator = staticmethod(lambda v: "kind")
+
+
+_NestedTagFn.__name__ = "Discriminator"
+
+
+class NestedBadTag(BaseModel):
+    pets: list[Annotated[CatModel | DogModel, _NestedTagFn()]]
+
+
+def test_nested_discriminator_callable_tag_rejected() -> None:
+    with pytest.raises(AnnotationError, match="needs a field name"):
+        PydanticValidator.spec(NestedBadTag)
+
+
+def test_nested_min_items_and_to_upper() -> None:
+    """`min_items`-only and `to_upper` marker attributes convert."""
+
+    class MinItems:
+        min_items = 2
+
+    class ToUpper:
+        to_upper = True
+
+    MinItems.__module__ = "annotated_types._fake"
+    ToUpper.__module__ = "annotated_types._fake"
+
+    class M(BaseModel):
+        xs: list[Annotated[list[int], MinItems()]]
+        ys: list[Annotated[str, ToUpper()]]
+
+    spec = PydanticValidator.spec(M)
+    fields = {f["name"]: f["type"]["item"] for f in spec["fields"]}
+    assert fields["xs"]["len"] == {"min": 2}
+    assert fields["ys"]["meta"]["transforms"] == {"upper": True}
+
+
+def test_nested_user_marker_is_ignored() -> None:
+    """A marker from a user module with no constraint attrs is dropped —
+    the `Annotated` unwraps to the bare base type."""
+
+    class ArbitraryMeta:
+        pass
+
+    class M(BaseModel):
+        xs: list[Annotated[int, ArbitraryMeta()]]
+
+    spec = PydanticValidator.spec(M)
+    item = spec["fields"][0]["type"]["item"]
+    assert item["kind"] == "int"
+
+
+def test_deeply_nested_qualname_rebinds() -> None:
+    """A multi-part qualname walks `Outer.Inner` and rebinds the class —
+    the path pydantic uses for relocated generic specializations."""
+    import sys
+    from types import SimpleNamespace
+
+    inner = SimpleNamespace()
+    inner.Cls = None
+    outer = SimpleNamespace()
+    outer.Inner = inner
+    sys.modules[__name__].Outer = outer
+    try:
+        moved = type(
+            "Cls",
+            (BaseModel,),
+            {"__module__": __name__, "__annotations__": {"x": int}},
+        )
+        moved.__qualname__ = "Outer.Inner.Cls"
+        spec = PydanticValidator.spec(moved)
+        assert spec["kind"] == "record"
+        assert inner.Cls is moved  # `_ensure_resolvable` bound it
+    finally:
+        del sys.modules[__name__].Outer
+
+
+def test_alias_choices_validation_alias_is_an_error() -> None:
+    """`AliasChoices`/`AliasPath` cannot be expressed as a wire name."""
+
+    class Aliased(BaseModel):
+        x: int = Field(validation_alias=AliasChoices("a", "b"))
+
+    with pytest.raises(AnnotationError, match="AliasChoices"):
+        PydanticValidator.spec(Aliased)
+
+
+def test_alias_generator_object_attributes() -> None:
+    """A non-callable `AliasGenerator` resolves `validation_alias`/`alias`
+    methods instead of being called directly."""
+    from pydantic.aliases import AliasGenerator
+
+    class Gen(BaseModel):
+        model_config = ConfigDict(
+            alias_generator=AliasGenerator(validation_alias=lambda n: f"v_{n}")
+        )
+        user_name: str = ""
+
+    spec = PydanticValidator.spec(Gen)
+    by_name = {f["name"]: f for f in spec["fields"]}
+    assert by_name["user_name"]["alias"] == "v_user_name"
+
+
+def test_compiled_regex_pattern_metadata() -> None:
+    """A compiled `re.Pattern` in `Field(pattern=...)` is unwrapped to
+    its source string."""
+    import re
+
+    class Rx(BaseModel):
+        x: Annotated[str, Field(pattern=re.compile("^a+$"))] = ""
+
+    spec = PydanticValidator.spec(Rx)
+    assert spec["fields"][0]["type"]["pattern"] == "^a+$"
+
+
+def test_discriminator_marker_in_metadata() -> None:
+    """A `pydantic.Discriminator` marker converts to the fulmen marker."""
+
+    class UnionHolder(BaseModel):
+        pet: Annotated[CatModel | DogModel, pydantic.Discriminator("kind")]
+
+    spec = PydanticValidator.spec(UnionHolder)
+    node = spec["fields"][0]["type"]
+    assert node["tag"] == "kind"
+
+
+def test_unknown_metadata_object_is_ignored() -> None:
+    """Non-pydantic Annotated metadata is documentation, not a contract —
+    `_convert_metadata_item` falls through and ignores it."""
+
+    class Opaque:
+        pass
+
+    class Holder(BaseModel):
+        x: Annotated[int, Opaque()] = 0
+
+    spec = PydanticValidator.spec(Holder)
+    assert spec["fields"][0]["type"]["kind"] == "int"
+
+
+def test_str_config_constraints_fold_into_len() -> None:
+    """`ConfigDict(str_min_length=...)` lands on the str node's len cons."""
+
+    class Cfg(BaseModel):
+        model_config = ConfigDict(str_min_length=2, str_max_length=4)
+        x: str = "ab"
+
+    spec = PydanticValidator.spec(Cfg)
+    node = spec["fields"][0]["type"]
+    assert node["len"] == {"min": 2, "max": 4}
+
+
+def test_json_schema_without_components() -> None:
+    """A `RootModel` spec is the inner type — `json_schema` emits no
+    `components` block when nothing was collected."""
+    assert PydanticValidator().json_schema(RootModel[int]) == {"type": "integer"}
+
+
+def test_str_config_transforms_fold_into_meta() -> None:
+    """`ConfigDict(str_to_lower/str_strip_whitespace)` lands as
+    transform flags on the str node's meta."""
+
+    class CfgT(BaseModel):
+        model_config = ConfigDict(str_to_lower=True, str_strip_whitespace=True)
+        x: str = "a"
+
+    spec = PydanticValidator.spec(CfgT)
+    transforms = spec["fields"][0]["type"]["meta"]["transforms"]
+    assert transforms == {"strip": True, "lower": True}
+
+
+def test_typing_generic_rebuilds_via_copy_with() -> None:
+    """`typing.List[...]` generic aliases rebuild through `copy_with`
+    after marker rewriting (unlike builtin `list[...]`)."""
+
+    class Lst(BaseModel):
+        xs: typing.List[pydantic.StrictInt] = Field(  # noqa: UP006 -- `typing.List` exercises the `copy_with` rebuild path
+            default_factory=list
+        )
+
+    spec = PydanticValidator.spec(Lst)
+    assert spec["fields"][0]["type"] == {"kind": "list", "item": {"kind": "int"}}
+
+
+def test_nested_compiled_pattern_unwraps_source() -> None:
+    """`Field(pattern=re.compile(...))` nested inside a container's
+    `Annotated` unwraps to the regex source text."""
+    import re
+
+    class RxList(BaseModel):
+        xs: list[Annotated[str, Field(pattern=re.compile("^b+$"))]] = Field(default_factory=list)
+
+    spec = PydanticValidator.spec(RxList)
+    assert spec["fields"][0]["type"]["item"]["pattern"] == "^b+$"

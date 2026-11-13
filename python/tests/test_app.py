@@ -7,8 +7,12 @@ from collections.abc import Callable
 
 import pytest
 from conftest import fetch
-from fulmen import Fulmen, Response, StartupError
+from fulmen import Fulmen, Model, Response, StartupError
 from fulmen._fulmen import serve_for_test
+
+
+class _Resp(Model):
+    x: int
 
 
 def test_text_response(serve: Callable[[Fulmen], str]) -> None:
@@ -389,3 +393,116 @@ def test_run_workers_rejects_zero() -> None:
     app = Fulmen()
     with pytest.raises(ValueError, match="workers must be >= 1"):
         app.run(workers=0)
+
+
+# -- constructor validation -------------------------------------------------------
+
+
+def test_prefix_must_be_a_rooted_path_without_trailing_slash() -> None:
+    with pytest.raises(ValueError, match="prefix must be empty"):
+        Fulmen(prefix="api")
+    with pytest.raises(ValueError, match="prefix must be empty"):
+        Fulmen(prefix="/api/")
+    Fulmen(prefix="/api")  # the valid shape constructs fine
+
+
+def test_settings_must_be_a_settings_type_or_instance() -> None:
+    with pytest.raises(TypeError, match="Settings subclass or instance"):
+        Fulmen(settings=object())
+
+
+# -- mount / resolve decorators ----------------------------------------------------
+
+
+def test_resolve_decorator_registers_a_hook(serve: Callable[[Fulmen], str]) -> None:
+    app = Fulmen(openapi_url=None)
+    calls: list[str] = []
+
+    @app.resolve
+    def dep(request) -> None:
+        calls.append("resolve")
+
+    @app.get("/x")
+    def x() -> str:
+        return "x"
+
+    base = serve(app)
+    assert fetch(f"{base}/x").status == 200
+    assert calls == ["resolve"]
+
+
+def test_mount_rejects_non_fulmen() -> None:
+    app = Fulmen(openapi_url=None)
+    with pytest.raises(TypeError, match="mount expects a Fulmen"):
+        app.mount(object())
+
+
+# -- docs/static collisions ---------------------------------------------------------
+
+
+def test_serve_docs_component_collision_is_startup_error() -> None:
+    """The same `merge_components` check runs on the `_serve_docs` path:
+    a plugin component colliding with a generated schema fails compile."""
+
+    class Collider:
+        name = "collider"
+        version = "1.0"
+
+        def setup(self, ctx) -> None:
+            ctx.add_openapi_component("schemas", "_Resp", {"type": "object"})
+
+    app = Fulmen()  # openapi_url defaults on — `_serve_docs` runs the merge
+    app.use(Collider())
+
+    @app.get("/r")
+    def r() -> _Resp:
+        return _Resp(x=1)
+
+    with pytest.raises(StartupError, match="collides with a generated component"):
+        app._compile_native()
+
+
+def test_route_specs_walks_when_no_walked_list_is_given() -> None:
+    """`_route_specs` defaults to walking the app tree itself."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/x")
+    def x() -> str:
+        return "x"
+
+    specs, problems = app._route_specs({})
+    assert problems == []
+    assert [(spec[0], spec[1]) for spec, _meta, _layers in specs] == [("GET", "/x")]
+
+
+def test_declared_route_on_openapi_path_wins() -> None:
+    """A declared `GET /openapi.json` beats the generated static route —
+    `_add_static_route` skips the mount instead of colliding."""
+    app = Fulmen()  # openapi_url defaults on
+
+    @app.get("/openapi.json")
+    def custom() -> dict:
+        return {"custom": True}
+
+    native = app._compile_native()
+    assert native is not None
+
+
+def test_default_app_serves_generated_openapi_and_docs(
+    serve: Callable[[Fulmen], str],
+) -> None:
+    """The generated static routes serve real bytes — `GET openapi_url`
+    returns the document and `GET docs_url` the Swagger page."""
+    app = Fulmen()
+
+    @app.get("/x")
+    def x() -> int:
+        return 1
+
+    base = serve(app)
+    doc = fetch(f"{base}/openapi.json")
+    assert doc.status == 200
+    assert "application/json" in doc.headers["content-type"]
+    page = fetch(f"{base}/docs")
+    assert page.status == 200
+    assert b"openapi.json" in page.body

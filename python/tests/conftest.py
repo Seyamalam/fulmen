@@ -5,15 +5,23 @@ from __future__ import annotations
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
 
 import pytest
-from fulmen import Fulmen
-from fulmen._fulmen import TestServer, serve_for_test
+
+if TYPE_CHECKING:
+    from fulmen import Fulmen
+    from fulmen._fulmen import TestServer
 
 
 @pytest.fixture
 def serve() -> Iterator[Callable[..., str]]:
     """Serve a `Fulmen` app on an ephemeral port; yield a `app -> base-url` factory."""
+    # conftest is imported before pytest-cov starts tracing; keeping the
+    # fulmen import inside the fixture lets coverage see the package's
+    # top-level statements.
+    from fulmen._fulmen import serve_for_test
+
     servers: list[TestServer] = []
 
     def factory(app: Fulmen, uvloop: bool | None = None) -> str:

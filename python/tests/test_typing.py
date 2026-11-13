@@ -721,3 +721,228 @@ def test_on_error_rejects_non_exceptions() -> None:
         app.on_error(42)
     with pytest.raises(TypeError, match="exception class"):
         app.on_error(str)
+
+
+# -- additional spec-tree edges ----------------------------------------------------
+
+
+def test_bare_container_hints() -> None:
+    """Unparameterized `set`/`frozenset`/`tuple` produce `any`-item nodes."""
+    b = SpecBuilder()
+    assert b.type_spec(set, "t") == {"kind": "set", "item": {"kind": "any"}}
+    assert b.type_spec(frozenset, "t") == {"kind": "frozenset", "item": {"kind": "any"}}
+    assert b.type_spec(tuple, "t") == {"kind": "tuple", "item": {"kind": "any"}}
+
+
+def test_annotated_reaches_alias_spec_directly() -> None:
+    """`type_spec` on a raw `Annotated` peels markers through `_alias_spec`."""
+    b = SpecBuilder()
+    node = b.type_spec(Annotated[str, Len(min=1)], "t")
+    assert node["kind"] == "str"
+    assert node["len"] == {"min": 1}
+
+
+def test_non_builtin_generic_is_unsupported() -> None:
+    """`G[int]` where `G` is neither dataclass, model nor pydantic model."""
+    T = typing.TypeVar("T")
+
+    class G(typing.Generic[T]):
+        pass
+
+    with pytest.raises(AnnotationError, match="unsupported"):
+        SpecBuilder().type_spec(G[int], "t")
+
+
+def test_recursive_model_is_an_annotation_error() -> None:
+    """`child: "Self"` — the record IR has no reference type yet."""
+
+    with pytest.raises(AnnotationError, match="recursive model"):
+        _LazyRecursive(x=None)
+
+
+class _LazyRecursive(Model):
+    x: "Optional[_LazyRecursive]"  # noqa: UP037,UP045 -- deliberate string forward reference
+
+
+def test_fieldspec_markers_inside_annotated() -> None:
+    """`Annotated[int, Field(...)]` merges default/alias/factory like `=`."""
+
+    class M(Model):
+        a: Annotated[int, Field(5, alias="wireA")]
+        b: Annotated[list[int], Field(default_factory=list)]
+
+    assert M().a == 5
+    assert M().b == []
+    spec = SpecBuilder().record_spec(M)
+    fields = {f["name"]: f for f in spec["fields"]}
+    assert fields["a"]["alias"] == "wireA"
+    assert set(fields["b"]["missing"]) == {"factory"}
+
+
+def test_declared_fieldspec_alias_and_default() -> None:
+    """`x = Field(alias=..)` at the declared position wires the alias;
+    `Field(default)` without factory resolves the literal default."""
+
+    class M(Model):
+        a: int = Field(alias="wireA")
+        b: int = Field(9)
+
+    assert M(wireA=3).a == 3
+    assert M(wireA=3).b == 9
+    spec = SpecBuilder().record_spec(M)
+    fields = {f["name"]: f for f in spec["fields"]}
+    assert fields["a"]["alias"] == "wireA"
+    assert fields["b"]["missing"] == {"literal": 9}
+
+
+def test_annotated_default_marker_without_declared_default() -> None:
+    """`x: Annotated[int, Default(5)]` — the node-level default fills `missing`."""
+
+    class M(Model):
+        x: Annotated[int, Default(5)]
+
+    assert M().x == 5
+
+
+def test_midtree_annotated_markers() -> None:
+    """Markers nested inside a container reach `apply_markers`."""
+
+    class M(Model):
+        xs: list[Annotated[int, Alias("item"), Default(1), Description("d")]]
+
+    spec = SpecBuilder().record_spec(M)
+    item = spec["fields"][0]["type"]["item"]
+    assert item["meta"]["alias"] == "item"
+    assert item["meta"]["default"] == 1
+    assert item["meta"]["description"] == "d"
+
+
+def test_midtree_unknown_marker_is_an_error() -> None:
+    with pytest.raises(AnnotationError, match="unsupported Annotated marker"):
+
+        class M(Model):
+            xs: list[Annotated[int, "junk"]]
+
+
+def _shout(v: str) -> str:
+    return v.upper()
+
+
+def test_dataclass_field_markers() -> None:
+    """Dataclass fields accept `Annotated` metadata — description, example,
+    deprecated, validators, `Default`, and constraints. Dataclasses enter
+    through `type_spec`, not `record_spec`."""
+
+    @dataclasses.dataclass
+    class D:
+        a: Annotated[int, Description("the a"), Example(1), Deprecated(), Range(ge=0)]
+        b: Annotated[str, AfterValidator(_shout), Default("x")]
+
+    spec = SpecBuilder().type_spec(D)
+    assert spec["flavor"] == "dataclass"
+    fields = {f["name"]: f for f in spec["fields"]}
+    assert fields["a"]["meta"]["description"] == "the a"
+    assert fields["a"]["meta"]["deprecated"] is True
+    assert fields["a"]["type"]["range"] == {"ge": 0}
+    # The `Default` marker lands on the node — a dataclass default still
+    # requires a real `field(default=...)` to change `missing`.
+    assert fields["b"]["missing"] == "required"
+    assert fields["b"]["type"]["meta"]["default"] == "x"
+    assert fields["b"]["type"]["meta"]["after"]
+
+
+def test_dataclass_field_unknown_marker_is_an_error() -> None:
+    @dataclasses.dataclass
+    class D:
+        x: Annotated[int, 42]
+
+    with pytest.raises(AnnotationError, match="unsupported Annotated marker"):
+        SpecBuilder().type_spec(D)
+
+
+def test_dataclass_missing_policies() -> None:
+    """`init=False` and `default_factory` fields are `omit`; a plain
+    default runs through `_missing`; no default is `required`."""
+
+    @dataclasses.dataclass
+    class D:
+        req: int
+        lazy: list[int] = dataclasses.field(default_factory=list)
+        defaulted: int = 7
+        derived: str = dataclasses.field(init=False, default="d")
+
+    spec = SpecBuilder().type_spec(D)
+    fields = {f["name"]: f["missing"] for f in spec["fields"]}
+    assert fields == {
+        "req": "required",
+        "lazy": "omit",
+        "defaulted": {"literal": 7},
+        "derived": "omit",
+    }
+
+
+@dataclasses.dataclass
+class _LinkedNode:
+    next: "_LinkedNode | None"  # noqa: UP037 -- deliberate string forward reference
+
+
+def test_recursive_dataclass_is_rejected() -> None:
+    builder = SpecBuilder()
+    with pytest.raises(AnnotationError, match="recursive dataclass"):
+        builder.type_spec(_LinkedNode)
+
+
+def test_fieldspec_unique_constraint() -> None:
+    """`Field(unique=True)` lands in the field's constraint dict."""
+
+    class M(Model):
+        tags: list[str] = Field(unique=True)
+
+    spec = SpecBuilder().record_spec(M)
+    assert spec["fields"][0]["type"]["unique"] is True
+
+
+def test_param_fieldspec_in_annotated() -> None:
+    """`Field()` inside a param `Annotated` merges alias/default/factory."""
+    info = p("x", Annotated[int, Query(), Field(alias="wire", default=3)])
+    assert info.wire_name == "wire"
+    assert info.default == 3
+    info2 = p("y", Annotated[list[int], Query(), Field(default_factory=list)])
+    assert info2.factory is list
+
+
+def test_param_marker_unique() -> None:
+    info = p("x", Annotated[list[int], Query(unique=True)])
+    assert info.spec["unique"] is True
+
+
+def test_compile_model_rename_overrides_spec() -> None:
+    """`compile_model(cls, rename=…)` writes the wire-rename rule."""
+
+    class M(Model):
+        field_one: int
+
+    _typing.compile_model(M, rename="kebab")
+    assert M.__spec__["rename"] == "kebab"
+
+
+def test_lazy_model_descriptor_compiles_on_first_use() -> None:
+    """A model declared before its field type compiles lazily."""
+    instance = _LazyOuter(inner=_LazyInner(v=7))
+    assert instance.inner.v == 7
+
+
+class _LazyOuter(Model):
+    inner: "_LazyInner"  # noqa: UP037 -- deliberate string forward reference
+
+
+class _LazyInner(Model):
+    v: int
+
+
+def test_unsupported_generic_alias_is_an_error() -> None:
+    """`Callable[[int], int]` and friends hit `_alias_spec`'s fallthrough."""
+    import collections.abc
+
+    with pytest.raises(AnnotationError, match="unsupported annotation Callable"):
+        SpecBuilder().type_spec(collections.abc.Callable[[int], int])

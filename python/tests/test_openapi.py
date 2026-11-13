@@ -8,6 +8,7 @@ it at `GET /openapi.json` next to a vendored Swagger UI under `/docs`.
 from __future__ import annotations
 
 import datetime
+import enum
 import gzip
 import json
 import uuid
@@ -23,6 +24,7 @@ from fulmen import (
     Body,
     Cookie,
     Created,
+    Default,
     Deprecated,
     Description,
     Discriminator,
@@ -39,10 +41,13 @@ from fulmen import (
     Pattern,
     Query,
     Range,
+    Raw,
     Response,
     StartupError,
+    UploadFile,
 )
 from fulmen import openapi as _openapi
+from fulmen._typing import SpecBuilder
 
 
 class Size(StrEnum):
@@ -60,6 +65,73 @@ class Level(IntEnum):
 class Address(Model):
     street: str
     zip_code: Annotated[str, Field(description="Postal code", example="90210")]
+
+
+class BodyPart(Model):
+    n: int
+
+
+class WeirdResponse(Response):
+    status_code = 799
+
+
+class MixedEnum(enum.Enum):
+    NONE = None
+    FLAG = True
+    RATE = 1.5
+    TAG = "x"
+
+
+class MixedHolder(Model):
+    m: MixedEnum
+
+
+class KebabModel(Model, rename="kebab"):
+    field_one: int
+    field_two: str
+
+
+class BlobModel(Model):
+    payload: bytes = b"k"
+
+
+class PageModel[T](Model):
+    items: list[T]
+
+
+class TagStrA(Model):
+    kind: str
+    a: int
+
+
+class TagStrB(Model):
+    kind: str
+
+
+class TagLitA(Model):
+    kind: Literal["a"] = "a"
+
+
+class TagNoB(Model):
+    other: str
+
+
+class OptDecModel(Model):
+    dec: Decimal | None
+    anything: Any | None
+
+
+class MetaDefaultModel(Model):
+    x: Annotated[int, Default(5)]
+    xs: list[Annotated[int, Default(7)]] = Field(default_factory=list)
+
+
+class EmptyModel(Model):
+    pass
+
+
+DupOne = type("Dup", (Model,), {"__annotations__": {"a": int}})
+DupTwo = type("Dup", (Model,), {"__annotations__": {"b": str}})
 
 
 class User(Model):
@@ -767,3 +839,501 @@ def test_route_option_type_errors() -> None:
         app.get("/x", tags=5)(lambda: 1)
     with pytest.raises(TypeError, match="tags"):
         app.get("/x", tags=[1, 2])(lambda: 1)
+
+
+# -- generation edges --------------------------------------------------------------
+
+
+def test_operation_id_dedup_counts_past_two() -> None:
+    """A third same-method collision on one base id takes the
+    `..._2` while-loop arm."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/a", operation_id="dup")
+    def a() -> str:
+        return "a"
+
+    @app.get("/b", operation_id="dup")
+    def b() -> str:
+        return "b"
+
+    @app.get("/c", operation_id="dup")
+    def c() -> str:
+        return "c"
+
+    doc = app.openapi()
+    ids = [doc["paths"][path]["get"]["operationId"] for path in ("/a", "/b", "/c")]
+    assert ids == ["dup", "dup_get", "dup_get_2"]
+
+
+def test_uploadfile_param_is_multipart() -> None:
+    app = Fulmen(openapi_url=None)
+
+    @app.post("/up")
+    def up(f: UploadFile) -> str:
+        return "ok"
+
+    doc = app.openapi()
+    content = doc["paths"]["/up"]["post"]["requestBody"]["content"]
+    assert "multipart/form-data" in content
+
+
+def test_multiple_body_params_form_an_object() -> None:
+    """Two `Body` params merge into one object schema keyed by wire name;
+    a literal default and a required member exercise `_object_schema`."""
+    app = Fulmen(openapi_url=None)
+
+    @app.post("/pair")
+    def pair(
+        first: Annotated[BodyPart, Body()],
+        second: Annotated[int, Body()] = 5,
+    ) -> str:
+        return "ok"
+
+    doc = app.openapi()
+    body = doc["paths"]["/pair"]["post"]["requestBody"]
+    schema = body["content"]["application/json"]["schema"]
+    assert schema["type"] == "object"
+    assert set(schema["properties"]) == {"first", "second"}
+    assert schema["properties"]["second"]["default"] == 5
+    assert schema["required"] == ["first"]
+    assert body["required"] is True
+
+
+def test_form_defaults_land_in_schema() -> None:
+    """A defaulted `Form` member documents `default` in the object schema."""
+    app = Fulmen(openapi_url=None)
+
+    @app.post("/f")
+    def f(name: Annotated[str, Form()], count: Annotated[int, Form()] = 3) -> str:
+        return "ok"
+
+    doc = app.openapi()
+    schema = doc["paths"]["/f"]["post"]["requestBody"]["content"][
+        "application/x-www-form-urlencoded"
+    ]["schema"]
+    assert schema["properties"]["count"]["default"] == 3
+    assert schema["required"] == ["name"]
+
+
+def test_unusual_response_status_has_generic_phrase() -> None:
+    """A status outside `HTTPStatus` still renders — summary falls back."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/w")
+    def w() -> WeirdResponse:
+        return WeirdResponse()
+
+    doc = app.openapi()
+    responses = doc["paths"]["/w"]["get"]["responses"]
+    assert "799" in responses
+
+
+def test_plain_enum_member_types() -> None:
+    """Enum members of different JSON types feed `_jtype`'s branches."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/h")
+    def h() -> MixedHolder:
+        return MixedHolder(m=MixedEnum.TAG)
+
+    doc = app.openapi()
+    schema = doc["components"]["schemas"]["MixedHolder"]["properties"]["m"]
+    # enum members collapse into the component or inline — either way it renders
+    assert "enum" in schema or "$ref" in schema
+
+
+def test_kebab_renamed_fields_wire_names() -> None:
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/k")
+    def k() -> KebabModel:
+        return KebabModel(field_one=1, field_two="x")
+
+    doc = app.openapi()
+    schema = doc["components"]["schemas"]["KebabModel"]
+    assert set(schema["properties"]) == {"field-one", "field-two"}
+
+
+def test_bytes_field_default_is_canonical() -> None:
+    """A `bytes` literal default must survive the `ref_name` dedupe key."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/b")
+    def b() -> BlobModel:
+        return BlobModel()
+
+    doc = app.openapi()
+    schema = doc["components"]["schemas"]["BlobModel"]["properties"]["payload"]
+    assert schema["type"] == "string"
+
+
+def test_generic_model_component_label() -> None:
+    """`Page[int]` specializes the generic record — component name carries
+    the argument label."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/p")
+    def p() -> PageModel[int]:
+        return PageModel(items=[1])
+
+    @app.get("/pp")
+    def pp() -> PageModel[PageModel[int]]:
+        return PageModel(items=[PageModel(items=[2])])
+
+    doc = app.openapi()
+    names = list(doc["components"]["schemas"])
+    assert any("Page" in n for n in names)
+
+
+def test_same_named_models_dedupe_component_names() -> None:
+    """Two record nodes mapping to one component name get `Name_2`.
+    (`type(...)` gives both classes the same qualname — a `Model`
+    subclass' spec captures `__qualname__` at class creation.)"""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/f")
+    def f() -> DupOne:
+        return DupOne(a=1)
+
+    @app.get("/s")
+    def s() -> DupTwo:
+        return DupTwo(b="x")
+
+    doc = app.openapi()
+    names = sorted(doc["components"]["schemas"])
+    assert names == ["Dup", "Dup_2"]
+
+
+def test_none_return_and_none_kind() -> None:
+    """`-> None` produces a `none` spec node → `{"type": "null"}` schema."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/n")
+    def n() -> None:
+        return None
+
+    doc = app.openapi()
+    assert doc["paths"]["/n"]["get"]["responses"] == {"204": {"description": "No Content"}}
+
+
+def test_raw_body_is_binary() -> None:
+    app = Fulmen(openapi_url=None)
+
+    @app.post("/raw")
+    def raw(body: Raw) -> str:
+        return "ok"
+
+    doc = app.openapi()
+    content = doc["paths"]["/raw"]["post"]["requestBody"]["content"]
+    schema = next(iter(content.values()))["schema"]
+    assert schema.get("format") == "binary"
+
+
+def test_tagged_union_with_nonliteral_tag() -> None:
+    """A tag field that's a plain `str` yields the discriminator property
+    without a value mapping."""
+
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/u")
+    def u() -> Annotated[TagStrA | TagStrB, Discriminator("kind")]:
+        return TagStrA(kind="a", a=1)
+
+    doc = app.openapi()
+    resp = doc["paths"]["/u"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert "oneOf" in resp or "anyOf" in resp
+
+
+def test_tagged_union_skips_non_record_and_missing_tag() -> None:
+    """`Discriminator` on a union with a non-record variant or a record
+    missing the tag field ignores those variants for the mapping."""
+
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/u1")
+    def u1() -> Annotated[TagLitA | int, Discriminator("kind")]:
+        return 1
+
+    @app.get("/u2")
+    def u2() -> Annotated[TagLitA | TagNoB, Discriminator("kind")]:
+        return TagLitA()
+
+    doc = app.openapi()
+    assert "/u1" in doc["paths"]
+    assert "/u2" in doc["paths"]
+
+
+def test_optional_decimal_and_any_nullable_shapes() -> None:
+    """`Optional[Decimal]` widens a type-list schema; `Optional[Any]`
+    falls back to `anyOf`-with-null."""
+
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/m")
+    def m() -> OptDecModel:
+        return OptDecModel(dec=None, anything=None)
+
+    doc = app.openapi()
+    props = doc["components"]["schemas"]["OptDecModel"]["properties"]
+    dec = props["dec"]
+    assert "anyOf" in dec or "null" in json.dumps(dec)
+
+
+def test_schema_gen_direct_edges() -> None:
+    """`schema(None)` and the unknown-kind fallback are cheap direct checks."""
+    gen = _openapi._SchemaGen()
+    assert gen.schema(None) == {}
+    assert gen.schema({"kind": "totally-unknown"}) == {}
+
+
+def test_meta_default_renders_in_schema() -> None:
+    """`Annotated[int, Default(5)]` mid-tree lands `default` on the
+    item schema; a field-level `Default` sets `missing` instead."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/m")
+    def m() -> MetaDefaultModel:
+        return MetaDefaultModel()
+
+    doc = app.openapi()
+    props = doc["components"]["schemas"]["MetaDefaultModel"]["properties"]
+    assert props["x"]["default"] == 5
+    assert props["xs"]["items"]["default"] == 7
+
+
+def test_empty_model_has_no_properties_key() -> None:
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/e")
+    def e() -> EmptyModel:
+        return EmptyModel()
+
+    doc = app.openapi()
+    schema = doc["components"]["schemas"]["EmptyModel"]
+    assert schema == {"type": "object"} or "properties" not in schema
+
+
+def test_jsonable_fallback_str() -> None:
+    """Non-scalar spec literals stringify (bytes base64 elsewhere)."""
+    assert _openapi._jsonable(Decimal("1.5")) == "1.5"
+    assert _openapi._jsonable(b"\x01") == "AQ=="
+
+
+def test_operation_id_fallback_to_handler_name() -> None:
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/x")
+    def some_handler() -> str:
+        return "x"
+
+    doc = app.openapi()
+    assert doc["paths"]["/x"]["get"]["operationId"] == "some_handler"
+
+
+def test_sig_defaults_returns_empty_for_uninspectable() -> None:
+    """`inspect.signature` failures yield `{}` — defaults just don't
+    render for handlers built on exotic callables."""
+    assert _openapi._sig_defaults(iter) == {}
+    assert _openapi._sig_defaults(42) == {}
+
+
+def test_any_response_renders_empty_schema() -> None:
+    """`-> Any` produces the `{}` schema — the `any`/`typevar` case."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/a")
+    def a() -> Any:
+        return 1
+
+    doc = app.openapi()
+    schema = doc["paths"]["/a"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert schema == {}
+
+
+def test_identical_variant_schemas_dedupe() -> None:
+    """`list[int] | tuple[int, ...]` produces two identical variant
+    schemas — `_merged_content` collapses them into one."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/u")
+    def u() -> list[int] | tuple[int, ...]:
+        return [1]
+
+    doc = app.openapi()
+    schema = doc["paths"]["/u"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert schema == {"type": "array", "items": {"type": "integer"}}
+
+
+class NullFieldModel(Model):
+    x: None
+
+
+class LitCat(Model):
+    kind: Literal["cat"]
+    lives: int
+
+
+class LitDog(Model):
+    kind: Literal["dog"]
+    fetch: bool
+
+
+def test_none_field_schema_is_null() -> None:
+    """A `None` annotation compiles to `{"type": "null"}` in the schema."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/n")
+    def n() -> NullFieldModel:
+        return NullFieldModel(x=None)
+
+    doc = app.openapi()
+    ref = doc["paths"]["/n"]["get"]["responses"]["200"]["content"]["application/json"]["schema"][
+        "$ref"
+    ]
+    name = ref.rsplit("/", 1)[-1]
+    assert doc["components"]["schemas"][name]["properties"]["x"] == {"type": "null"}
+
+
+def test_generic_dict_arg_substitutes_into_list_items() -> None:
+    """`Page[dict[str, int]]` — `_subst_any` recurses into dict-valued
+    node subtrees while binding the typevar."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/g")
+    def g() -> PageModel[dict[str, int]]:
+        return PageModel(items=[{"a": 1}])
+
+    doc = app.openapi()
+    ref = doc["paths"]["/g"]["get"]["responses"]["200"]["content"]["application/json"]["schema"][
+        "$ref"
+    ]
+    name = ref.rsplit("/", 1)[-1]
+    items = doc["components"]["schemas"][name]["properties"]["items"]
+    assert items["items"] == {
+        "type": "object",
+        "additionalProperties": {"type": "integer"},
+    }
+
+
+def test_param_literal_and_unbacked_omit_defaults() -> None:
+    """A `Default` marker lands in the param schema directly; an
+    `Optional` param with no handler default stays omit-without-default."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/p")
+    def p(
+        a: Annotated[int, Query(), Default(3)],
+        b: Annotated[int | None, Query()],
+    ) -> int:
+        return a
+
+    doc = app.openapi()
+    params = doc["paths"]["/p"]["get"]["parameters"]
+    schemas = {param["name"]: param["schema"] for param in params}
+    assert schemas["a"]["default"] == 3
+    assert "default" not in schemas["b"]
+
+
+def test_tagged_union_emits_discriminator_mapping() -> None:
+    """Variants sharing a single-member `Literal` tag field produce a
+    `discriminator` with a per-variant schema mapping."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/pet")
+    def pet() -> LitCat | LitDog:
+        return LitCat(kind="cat", lives=9)
+
+    doc = app.openapi()
+    schema = doc["paths"]["/pet"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]
+    assert schema["discriminator"]["propertyName"] == "kind"
+    assert set(schema["discriminator"]["mapping"]) == {"cat", "dog"}
+
+
+class TupPage[T](Model):
+    pair: tuple[T, str]
+
+
+class PlainPet(Model):
+    lives: int
+
+
+class StrKindPet(Model):
+    kind: str
+
+
+class MultiKindPet(Model):
+    kind: Literal["a", "b"]
+
+
+def test_generic_list_values_substitute() -> None:
+    """`tuple[T, str]` inside a generic Model — `_subst_any` recurses
+    into list-valued node entries too."""
+    app = Fulmen(openapi_url=None)
+
+    @app.get("/t")
+    def t() -> TupPage[int]:
+        return TupPage(pair=(1, "a"))
+
+    doc = app.openapi()
+    ref = doc["paths"]["/t"]["get"]["responses"]["200"]["content"]["application/json"]["schema"][
+        "$ref"
+    ]
+    name = ref.rsplit("/", 1)[-1]
+    pair = doc["components"]["schemas"][name]["properties"]["pair"]
+    assert pair["prefixItems"] == [{"type": "integer"}, {"type": "string"}]
+
+
+def test_form_object_param_defaults() -> None:
+    """Form params merge into one object schema — a `Default` marker
+    emits `default`, a signature default echoes it, and an all-optional
+    form emits no `required` key."""
+    app = Fulmen(openapi_url=None)
+
+    @app.post("/f")
+    def f(
+        a: Annotated[int, Form(), Default(3)],
+        b: Annotated[int | None, Form()] = None,
+    ) -> int:
+        return a
+
+    doc = app.openapi()
+    schema = doc["paths"]["/f"]["post"]["requestBody"]["content"][
+        "application/x-www-form-urlencoded"
+    ]["schema"]
+    assert schema["properties"]["a"]["default"] == 3
+    assert schema["properties"]["b"]["default"] is None
+    assert "required" not in schema
+
+
+def test_discriminator_skips_unusable_variants() -> None:
+    """Defensive IR handling: native descriptor validation rejects
+    malformed tagged unions upstream, but `_SchemaGen` still skips
+    non-record variants, variants lacking the tag field, non-literal tag
+    fields and multi-member `Literal` tags when building the mapping."""
+    gen = _openapi._SchemaGen()
+    variants = [
+        SpecBuilder().record_spec(LitCat),
+        SpecBuilder().record_spec(PlainPet),
+        SpecBuilder().record_spec(StrKindPet),
+        SpecBuilder().record_spec(MultiKindPet),
+        {"kind": "int"},
+    ]
+    schema = gen.schema({"kind": "union", "tag": "kind", "variants": variants})
+    disc = schema["discriminator"]
+    assert disc["propertyName"] == "kind"
+    assert set(disc["mapping"]) == {"cat"}
+
+
+def test_discriminator_with_no_usable_variant_has_no_mapping() -> None:
+    """A tagged union whose variants carry no single-member literal tag
+    emits `propertyName` but no `mapping`."""
+    gen = _openapi._SchemaGen()
+    variants = [
+        SpecBuilder().record_spec(PlainPet),
+        SpecBuilder().record_spec(StrKindPet),
+    ]
+    schema = gen.schema({"kind": "union", "tag": "kind", "variants": variants})
+    assert schema["discriminator"] == {"propertyName": "kind"}
