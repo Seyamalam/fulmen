@@ -62,14 +62,40 @@ class NativeApp:
             bool,
             bool,
             list[tuple[int | None, Descriptor | None]],
+            list[int],
         ],
     ) -> None: ...
+    def add_scope(self) -> int:
+        """Allocate a route-group scope id (mounted applications)."""
+    def add_hook(
+        self,
+        phase: str,
+        callable: Callable[..., object],
+        is_async: bool,
+        name: str,
+        priority: int,
+        scope: int,
+    ) -> None:
+        """Record one lifecycle hook under `scope` (§8)."""
     def add_error_handler(
         self,
         exc_class: type[BaseException],
         handler: Callable[..., object],
         is_async: bool,
+        scope: int,
     ) -> None: ...
+    def add_lifecycle_hook(
+        self,
+        kind: str,
+        callable: Callable[..., object],
+        is_async: bool,
+    ) -> None:
+        """Record an `on_startup`/`on_shutdown` hook (`kind`)."""
+    def describe_routes(
+        self,
+    ) -> list[tuple[str, str, str, list[tuple[str, str, str]], list[str], int]]:
+        """`(method, path, handler, chains, on_error, cost)` per route —
+        the `fulmen routes` report, built from declarations only."""
 
 class AsyncPump:
     """The asyncio bridge's loop callback (internal, not importable).

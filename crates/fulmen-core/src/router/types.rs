@@ -78,6 +78,8 @@ pub struct RouteInfo {
     path: Box<str>,
     handler_index: u32,
     params: Box<[ParamSpec]>,
+    hooks: crate::pipeline::RouteHooks,
+    errors: u32,
 }
 
 impl RouteInfo {
@@ -86,12 +88,16 @@ impl RouteInfo {
         path: impl Into<Box<str>>,
         handler_index: u32,
         params: Box<[ParamSpec]>,
+        hooks: crate::pipeline::RouteHooks,
+        errors: u32,
     ) -> Self {
         Self {
             method,
             path: path.into(),
             handler_index,
             params,
+            hooks,
+            errors,
         }
     }
 
@@ -113,6 +119,16 @@ impl RouteInfo {
     /// The route's path parameters, in declaration order.
     pub fn params(&self) -> &[ParamSpec] {
         &self.params
+    }
+
+    /// The route's resolved lifecycle hook chains (DESIGN.md §8).
+    pub fn hooks(&self) -> &crate::pipeline::RouteHooks {
+        &self.hooks
+    }
+
+    /// Index of the route's `on_error` handler table (`0` = app-wide).
+    pub fn error_table(&self) -> u32 {
+        self.errors
     }
 }
 

@@ -484,6 +484,28 @@ piling up in memory ([§14.4](#144-load-shedding)).
 Hooks in each phase run in plugin registration order, then app hooks.
 Group-scoped hooks run only for routes in that group.
 
+Hook contract: the eight hookable phases are `on_request`,
+`before_route`, `guard`, `resolve`, `before_handle`, `after_handle`,
+`on_response`, `after_response` — the remaining phases run in Rust and
+take no hooks. Decision-phase hooks take `hook(request)`; post-handler
+phases take `hook(request, response)`. `None` continues the pipeline; a
+`dict` merges into `request.state` and continues; any other value
+becomes a response — a short-circuit answer in decision phases, a
+replacement in post-handler phases. A post-phase hook that mutates
+`response` in place and returns `None` still propagates its edits. A
+hook that raises routes through `on_error` (§17 MRO matching) like a
+handler error. `after_response` hooks run after the response is written
+— fire-and-forget; their return values and failures are logged, never
+answered. Within a phase, hooks sort by `(priority, registration
+order)`: bands below `PRIORITY_USER` (`PRIORITY_SECURITY` = 100,
+`PRIORITY_SYSTEM` = 500, `PRIORITY_USER` = 1000) are reserved so
+security plugins precede user hooks regardless of registration order
+(§13.2). `def` hooks run on the sync pool, `async def` hooks on the
+asyncio loop — each Python hook is one Python crossing, so a route's
+per-request cost is `1 + python hooks` (the handler plus its resolved
+chains), which `fulmen routes --cost` prints. Registration closes when
+the app compiles (§14.8).
+
 ## 9. Router
 
 ### 9.1 Syntax

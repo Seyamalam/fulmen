@@ -85,6 +85,14 @@ pub(crate) enum ParamValue {
         /// The already-validated value.
         value: Value<'static>,
     },
+    /// The shared `fulmen.request.Request` object — materialized lazily
+    /// inside the executor so hooks and `request`-sourced handler params
+    /// all receive the one instance (§8, §10.1).
+    Request(Arc<crate::hooks::RequestSnapshot>),
+    /// The in-flight wire response as a `fulmen.responses.Response`
+    /// object — the second argument of post-phase hooks (`after_handle`,
+    /// `on_response`, `after_response`).
+    ResponseView(Arc<crate::hooks::ResponseView>),
 }
 
 /// The handler's return value converted to owned Rust data.
@@ -205,23 +213,38 @@ pub(crate) struct DeferredCall {
 pub(crate) enum JobAnswer {
     /// The request is answered.
     Response(fulmen_server::Response),
+    /// A hook job's converted return — `NoneReturned` means "continue",
+    /// anything else becomes a response through
+    /// [`into_response`] (§8 hook semantics live in the dispatcher).
+    HookReturn(PyReturn),
     /// Route this `on_error` call through the matching executor.
     Deferred(DeferredCall),
 }
 
 /// Context the worker needs to log through Python's `logging`, recognise
 /// `fulmen.Response`, and route typed errors (all cached at compile time).
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent job flags set per call kind — a state machine would conflate orthogonal axes"
+)]
 pub(crate) struct PyCtx<'a> {
     /// `logging.getLogger("fulmen")`.
     pub(crate) logger: &'a Py<PyAny>,
     /// The `fulmen.responses.Response` class object.
     pub(crate) response_cls: &'a Py<PyAny>,
-    /// The app's `on_error` table.
+    /// The `fulmen.request.Request` class object — materializes
+    /// `request`-sourced arguments and hook `request` parameters.
+    pub(crate) request_cls: &'a Py<PyAny>,
+    /// The `on_error` table this job routes through (the matched route's —
+    /// group-scoped tables merge group handlers over the app set).
     pub(crate) errors: &'a ErrorTable,
     /// `-> None`/`-> NoContent` declared: `None` returns answer `204`.
     pub(crate) none_ok: bool,
     /// `false` on error-handler jobs: their failures never defer again.
     pub(crate) route_errors: bool,
+    /// `true` on hook jobs: a `None` return means "continue the
+    /// pipeline", not a `204`/failure (§8).
+    pub(crate) hook: bool,
     /// `"{METHOD} {path}"` identifying the route in log lines.
     pub(crate) label: &'a str,
     /// The route's declared response contract — picks the encode
@@ -282,6 +305,11 @@ pub(crate) fn settle(
             CallOutcome::Failed
         }
         Ok(PyReturn::NoneReturned) => {
+            // A hook's `None` means "continue" (§8); only handler jobs
+            // apply the `none_ok` 204 / failure contract.
+            if ctx.hook {
+                return CallOutcome::Return(PyReturn::NoneReturned);
+            }
             if ctx.none_ok {
                 return CallOutcome::Return(PyReturn::Built {
                     status: StatusCode::NO_CONTENT,
@@ -390,11 +418,12 @@ fn problem_from_err(py: Python<'_>, err: &PyErr) -> Option<PyReturn> {
 pub(crate) fn build_args<'py>(
     py: Python<'py>,
     args: &[ParamArg],
+    ctx: &PyCtx<'_>,
 ) -> Result<(Bound<'py, PyTuple>, Bound<'py, PyDict>), InvokeError> {
     let mut positional = Vec::new();
     let kwargs = PyDict::new(py);
     for arg in args {
-        let value = resolve_value(py, &arg.value)?;
+        let value = resolve_value(py, &arg.value, ctx)?;
         match arg.kind {
             ArgKind::Positional => positional.push(value),
             ArgKind::Named => kwargs
@@ -408,10 +437,12 @@ pub(crate) fn build_args<'py>(
 
 /// A `ParamValue` → the Python object passed to the callable.
 /// `Validated` values only materialize (validation ran at dispatch);
-/// `CallDefault` invokes the parameter's default factory.
+/// `CallDefault` invokes the parameter's default factory; `Request` and
+/// `ResponseView` build the objects hooks see.
 fn resolve_value<'py>(
     py: Python<'py>,
     value: &ParamValue,
+    ctx: &PyCtx<'_>,
 ) -> Result<Bound<'py, PyAny>, InvokeError> {
     match value {
         ParamValue::Obj(o) => Ok(o.bind(py).clone()),
@@ -425,6 +456,8 @@ fn resolve_value<'py>(
             .do_materialize(py, value)
             .map(|o| o.into_bound(py))
             .map_err(InvokeError::Internal),
+        ParamValue::Request(snap) => snap.object(py, ctx.request_cls).map(|o| o.into_bound(py)),
+        ParamValue::ResponseView(view) => view.materialize(py, ctx.response_cls),
     }
 }
 
@@ -435,11 +468,77 @@ fn invoke(
     args: &[ParamArg],
     ctx: &PyCtx<'_>,
 ) -> Result<PyReturn, InvokeError> {
-    let (tuple, kwargs) = build_args(py, args)?;
+    let (tuple, kwargs) = build_args(py, args, ctx)?;
     let result = callable
         .call(py, tuple, Some(&kwargs))
         .map_err(InvokeError::Handler)?;
-    convert_result(py, result.bind(py), ctx).map_err(InvokeError::Internal)
+    let bound = result.bind(py);
+    if let Some(ret) = hook_context(py, bound, request_snapshot(args), response_view(args), ctx)? {
+        return Ok(ret);
+    }
+    convert_result(py, bound, ctx).map_err(InvokeError::Internal)
+}
+
+/// The `RequestSnapshot` a job's arguments carry, when one is present
+/// (hooks always carry it as `args[0]`).
+pub(crate) fn request_snapshot(args: &[ParamArg]) -> Option<&Arc<crate::hooks::RequestSnapshot>> {
+    args.iter().find_map(|arg| match &arg.value {
+        ParamValue::Request(snap) => Some(snap),
+        _ => None,
+    })
+}
+
+/// The `ResponseView` a post-phase hook job carries, when present.
+pub(crate) fn response_view(args: &[ParamArg]) -> Option<&Arc<crate::hooks::ResponseView>> {
+    args.iter().find_map(|arg| match &arg.value {
+        ParamValue::ResponseView(view) => Some(view),
+        _ => None,
+    })
+}
+
+/// §8 hook-return semantics, applied inside the executor:
+///
+/// * a `dict` return merges into `request.state` and continues;
+/// * on a post-handler phase, a `None`/`dict` return propagates the
+///   (possibly mutated) `response` view — in-place header edits apply —
+///   while an explicit return value wins outright;
+/// * a non-hook job, or any other hook return, answers `None` so the
+///   caller converts the result normally.
+pub(crate) fn hook_context(
+    py: Python<'_>,
+    result: &Bound<'_, PyAny>,
+    snapshot: Option<&Arc<crate::hooks::RequestSnapshot>>,
+    view: Option<&Arc<crate::hooks::ResponseView>>,
+    ctx: &PyCtx<'_>,
+) -> Result<Option<PyReturn>, InvokeError> {
+    if !ctx.hook {
+        return Ok(None);
+    }
+    let mut merged = false;
+    if result.is_instance_of::<PyDict>()
+        && let Some(snapshot) = snapshot
+    {
+        let request = snapshot.object(py, ctx.request_cls)?;
+        let state = request
+            .bind(py)
+            .getattr("state")
+            .map_err(InvokeError::Internal)?;
+        state
+            .call_method1("update", (result,))
+            .map_err(InvokeError::Internal)?;
+        merged = true;
+    }
+    if (merged || result.is_none())
+        && let Some(object) = view.and_then(|v| v.object())
+    {
+        return convert_result(py, object.bind(py), ctx)
+            .map(Some)
+            .map_err(InvokeError::Internal);
+    }
+    if merged {
+        return Ok(Some(PyReturn::NoneReturned));
+    }
+    Ok(None)
 }
 
 /// Convert a Python return value into [`PyReturn`].

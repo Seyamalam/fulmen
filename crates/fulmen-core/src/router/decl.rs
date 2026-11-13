@@ -8,6 +8,7 @@ use http::Method;
 
 use super::pattern::join_paths;
 use super::types::{ScalarType, TrailingSlash};
+use crate::pipeline::RouteHooks;
 
 /// The type declared for a `{name}` or `{*name}` path parameter.
 ///
@@ -75,6 +76,13 @@ pub struct RouteDecl {
     pub handler_index: u32,
     /// `(name, type)` for each path parameter, in declaration order.
     pub param_types: Vec<(String, PathParamType)>,
+    /// The route's resolved lifecycle hook chains (DESIGN.md §8). Empty —
+    /// and allocation-free — when no hooks apply.
+    pub hooks: RouteHooks,
+    /// Index of the route's `on_error` handler table in the application's
+    /// error-table list; `0` is the application-wide table. Group-scoped
+    /// error handlers merge into a per-route table (inner scopes first).
+    pub errors: u32,
 }
 
 impl RouteDecl {
@@ -85,6 +93,8 @@ impl RouteDecl {
             path: path.into(),
             handler_index,
             param_types: Vec::new(),
+            hooks: RouteHooks::default(),
+            errors: 0,
         }
     }
 
@@ -92,6 +102,20 @@ impl RouteDecl {
     #[must_use]
     pub fn param(mut self, name: impl Into<String>, ty: impl Into<PathParamType>) -> Self {
         self.param_types.push((name.into(), ty.into()));
+        self
+    }
+
+    /// Attach the route's resolved hook chains (builder style).
+    #[must_use]
+    pub fn hooks(mut self, hooks: RouteHooks) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// Select the route's `on_error` handler table (builder style).
+    #[must_use]
+    pub fn error_table(mut self, index: u32) -> Self {
+        self.errors = index;
         self
     }
 }

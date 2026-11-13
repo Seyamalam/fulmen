@@ -26,6 +26,7 @@ mod descriptor;
 mod dispatch;
 mod encode;
 mod extract;
+mod hooks;
 mod json;
 mod pool;
 mod serve;

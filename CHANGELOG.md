@@ -10,6 +10,41 @@ exists. Move the `Unreleased` entries under the new version heading first.
 
 ## [Unreleased]
 
+### Added
+
+- Lifecycle hooks (M3.1–M3.4 + M3.9, DESIGN.md §8): the eight hookable
+  phases (`on_request`, `before_route`, `guard`, `resolve`,
+  `before_handle`, `after_handle`, `on_response`, `after_response`) each
+  run native closures inline (zero crossings — the M4 security-plugin
+  slot) and Python callables through the executors (`def` → sync pool,
+  `async def` → asyncio loop). `hook(request)` in decision phases,
+  `hook(request, response)` post-handler; `None` continues, a `dict`
+  merges into `request.state`, a returned value short-circuits to or
+  replaces the response, in-place `response` mutation propagates, and
+  hook exceptions route through `on_error`'s exception-MRO table.
+  `after_response` is fire-and-forget after the response is written.
+  Hooks register via `@app.<phase>` decorators or
+  `app.add_hook(phase, fn, priority=…)`; per-phase ordering is
+  `(priority, registration order)` with `PRIORITY_SECURITY` /
+  `PRIORITY_SYSTEM` bands reserved below `PRIORITY_USER` so security
+  plugins always precede user hooks.
+- Route groups (§5.5): `Fulmen(prefix="/api")` + `app.mount(api)` —
+  the mounted app's routes join under its prefix, and hooks/`on_error`
+  handlers declared on it apply only to those routes (nested mounts
+  compose). `request: Request` handler parameters inject the request
+  object; `fulmen.request.Request`/`Headers` are public.
+- `@app.on_startup` / `@app.on_shutdown` lifecycle callbacks (§5.7):
+  startup runs after a successful compile before bind (failures abort
+  startup); shutdown runs once when the server stops (failures log).
+- `fulmen routes` (M3.4): lists `method path -> handler` from the
+  compiled declarations; `--hooks` prints each route's resolved
+  `(phase, name, kind)` hook chain plus scoped `on_error` entries,
+  `--cost` prints the Python-crossing count (`1` + Python hooks — a
+  native-only route stays at the M3 invariant of one crossing).
+- Registration seals at compile (§14.8, M3.9): routes, hooks,
+  `on_error` handlers, mounts and lifecycle callbacks registered after
+  `run()`/`_compile_native()` raise `RuntimeError`.
+
 ## [0.2.0] - 2026-11-12
 
 Milestone M2 — "types". Handler signatures are the contract: every

@@ -52,6 +52,12 @@ pub(crate) struct SyncJob {
     pub(crate) none_ok: bool,
     /// `false` on `on_error`-handler jobs: their failures never defer again.
     pub(crate) route_errors: bool,
+    /// `true` on hook jobs: the answer is the raw converted return
+    /// ([`JobAnswer::HookReturn`]), not a finalized wire response.
+    pub(crate) hook: bool,
+    /// The `on_error` table this job routes through (the route's own —
+    /// group-scoped error handlers merge over the app set, §8).
+    pub(crate) errors: Arc<ErrorTable>,
     /// Completes with the wire response or a deferred `on_error` call.
     pub(crate) respond: oneshot::Sender<JobAnswer>,
 }
@@ -87,8 +93,8 @@ struct PoolShared {
     batch_size: usize,
     logger: Arc<Py<PyAny>>,
     response_cls: Arc<Py<PyAny>>,
-    /// The app's `@app.on_error` table (§17).
-    errors: Arc<ErrorTable>,
+    /// The `fulmen.request.Request` class — materializes `request` args.
+    request_cls: Arc<Py<PyAny>>,
     /// `Fulmen(debug=True)`/`serve(debug=…)`: every handler result is
     /// validated against its declared response descriptor (§11.6).
     debug: bool,
@@ -159,7 +165,7 @@ impl SyncPool {
             batch_size: batch_size.max(1),
             logger: deps.logger,
             response_cls: deps.response_cls,
-            errors: deps.errors,
+            request_cls: deps.request_cls,
             debug: deps.debug,
         });
         for index in 0..threads {
@@ -269,6 +275,7 @@ fn run_jobs(shared: &PoolShared, jobs: Vec<SyncJob>) {
     };
     for (job, result) in outcomes.drain(..) {
         let answer = match result {
+            JobResult::Return(ret) if job.hook => JobAnswer::HookReturn(ret),
             JobResult::Return(ret) => JobAnswer::Response(convert::into_response(ret)),
             JobResult::Overdue => JobAnswer::Response(convert::service_unavailable()),
             JobResult::Deferred(call) => JobAnswer::Deferred(call),
@@ -288,9 +295,11 @@ fn execute_job(py: Python<'_>, shared: &PoolShared, job: &SyncJob) -> JobResult 
     let ctx = PyCtx {
         logger: &shared.logger,
         response_cls: &shared.response_cls,
-        errors: &shared.errors,
+        request_cls: &shared.request_cls,
+        errors: &job.errors,
         none_ok: job.none_ok,
         route_errors: job.route_errors,
+        hook: job.hook,
         label: &job.label,
         contract: &job.contract,
         debug: shared.debug,

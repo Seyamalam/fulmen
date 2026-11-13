@@ -26,6 +26,7 @@ use http::header::{CONTENT_TYPE, COOKIE};
 
 use crate::convert::{self, ArgKind, ParamArg, ParamValue};
 use crate::dispatch::{CallSource, CallSpecArg, MissingArg};
+use crate::hooks::RequestSnapshot;
 
 /// The outcome of [`extract_args`]: either the call's arguments (an
 /// extraction `4xx` already came back as `Reply`).
@@ -96,6 +97,8 @@ struct Extraction<'r> {
     query: Option<Value<'r>>,
     cookie: Option<Value<'r>>,
     form: Option<Value<'r>>,
+    /// The shared `Request` snapshot — `request`-sourced params borrow it.
+    snapshot: Option<&'r Arc<RequestSnapshot>>,
 }
 
 /// Build the call arguments for a route hit: decode each wire source
@@ -105,10 +108,15 @@ struct Extraction<'r> {
 /// `hit.params` already typed the path params (`int` segments only match
 /// when they parse — invalid input never reaches extraction, DESIGN.md
 /// §9.2/D20); everything else is pulled from `request` here.
+///
+/// `snapshot` is the request's shared `Request` snapshot — already built
+/// by the dispatcher when the handler declared a `request` parameter (it
+/// doubles as the object hooks receive).
 pub(crate) fn extract_args(
     hit: &RouteHit<'_>,
     spec: &[CallSpecArg],
     request: &Request,
+    snapshot: Option<&Arc<RequestSnapshot>>,
 ) -> Extracted {
     let route = body_route(spec, request);
     if route == BodyRoute::Unsupported {
@@ -128,6 +136,7 @@ pub(crate) fn extract_args(
         query: None,
         cookie: None,
         form: None,
+        snapshot,
     };
     let mut args: Vec<ParamArg> = Vec::with_capacity(spec.len());
     for arg in spec {
@@ -172,6 +181,12 @@ impl Extraction<'_> {
             CallSource::Cookie => self.cookie_value(arg),
             CallSource::Body => self.body_value(arg),
             CallSource::Form => self.form_value(arg),
+            CallSource::Request => Ok(match self.snapshot {
+                Some(snap) => Some(ParamValue::Request(Arc::clone(snap))),
+                // `wants_request` guarantees the snapshot — this arm is
+                // defensive against a spec/dispatcher mismatch only.
+                None => return Err(Box::new(convert::internal_error())),
+            }),
         }
     }
 
