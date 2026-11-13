@@ -25,7 +25,7 @@ import typing
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Unpack
 
-from fulmen import _typing
+from fulmen import _di, _typing
 from fulmen import openapi as _openapi
 from fulmen import plugins as _plugins
 from fulmen._fulmen import NativeApp, StartupError, compile_descriptor
@@ -121,8 +121,10 @@ class Fulmen:
         "_on_shutdown",
         "_on_startup",
         "_openapi_url",
+        "_overrides",
         "_plugins",
         "_prefix",
+        "_providers",
         "_sealed",
         "_settings",
         "_settings_cache",
@@ -167,6 +169,8 @@ class Fulmen:
         self._on_shutdown: list[tuple[_Handler, bool]] = []
         self._mounted: list[Fulmen] = []
         self._plugins: list[tuple[object, _plugins.PluginHandle[Any], _plugins.PluginMeta]] = []
+        self._providers: list[_di.Provider[Any]] = []
+        self._overrides: dict[object, object] = {}
         self._prefix = prefix
         self._sealed = False
         self._settings = settings
@@ -205,6 +209,7 @@ class Fulmen:
 
         def decorator(handler: _Handler) -> _Handler:
             self._check_open()
+            _di.stamp_localns(handler)
             for method in methods:
                 self._declared.append((method.upper(), path, handler, meta))
             return handler
@@ -422,6 +427,69 @@ class Fulmen:
         self._plugins.append((plugin, handle, meta))
         return handle
 
+    def provide(
+        self,
+        decl: object = None,
+        /,
+        *,
+        scope: _di.Scope | str | None = None,
+        provides: object = UNSET,
+        name: str | None = None,
+    ) -> Callable[[object], _di.Provider[Any]] | _di.Provider[Any]:
+        """Register a provider application-wide (DESIGN.md §12.1).
+
+        Providers reachable through `Annotated[T, provider]` markers
+        register themselves on first use — `provide()` is for providers
+        only reached by bare-type lookups (a provider parameter like
+        `settings: Settings`) or by plugins' handle markers. The returned
+        `Provider` doubles as an `Annotated` marker.
+
+        `decl` may be a `Provider` (returned as-is), a callable (wrapped
+        with `scope` — `Scope.REQUEST` unless given), or any other value
+        (an application-scoped constant provider). Usable directly or as
+        a decorator (`@app.provide(scope=Scope.APP)`).
+        """
+        self._check_open()
+
+        def register(d: object, localns: dict[str, Any] | None) -> _di.Provider[Any]:
+            self._check_open()
+            registered = _di.as_provider(
+                d, scope=scope, provides=provides, name=name, _localns=localns
+            )
+            self._providers.append(registered)
+            return registered
+
+        if decl is not None:
+            return register(decl, _di.frame_locals(1))
+
+        def decorator(d: object) -> _di.Provider[Any]:
+            return register(d, _di.frame_locals(1))
+
+        return decorator
+
+    def override(self, original: object, replacement: object, /) -> _OverrideToken:
+        """Substitute `replacement` wherever `original` is injected (§12.3).
+
+        `original` is a provider marker — a `Provider`, a registered
+        callable, or a value registered with `app.provide`/`ctx.add_provider`.
+        `replacement` may be a `Provider` (keeps its own scope), a
+        callable (wrapped with the original's scope), or a plain value.
+        The app itself is not mutated: the substitution applies when the
+        dependency graph is built at compile, and every dependent
+        provider resolves the replacement — overrides validate like any
+        other declaration.
+
+        Call it plainly (`app.override(db, fake_db)`) or as a context
+        manager (`with app.override(db, fake_db):`) — the token reverts
+        the override on exit. Overrides are declarations: they seal at
+        compile like everything else (§14.8).
+        """
+        self._check_open()
+        _di.stamp_localns(replacement)
+        token = _OverrideToken(self._overrides, original, replacement)
+        self._overrides[original] = replacement
+        return token
+
     @property
     def settings(self) -> Settings | None:
         """The app's resolved settings instance (DESIGN.md §20), or
@@ -601,6 +669,22 @@ class Fulmen:
         plan.finish()
         return plan
 
+    def _provider_graph(self, plan: _plugins.PluginPlan) -> _di.Graph:
+        """Build the DI registry: `app.provide` declarations from every
+        app in the tree plus each plugin's `ctx.add_provider`
+        contributions, with `app.override` substitutions recorded for
+        graph validation (§12)."""
+        graph = _di.Graph()
+        for app, _base, _chain in self._walk(extra_mounts=plan.extra_mounts):
+            for decl in app._providers:
+                graph.declare(decl)
+        for use, ctx in plan.entries:
+            graph.known_plugins.add(use.meta.name)
+            for decl in ctx.staged.providers:
+                graph.declare(decl, owner=use.meta.name)
+        graph.override_map.update(self._overrides)
+        return graph
+
     def _plugin_cli_commands(self) -> tuple[dict[str, _plugins.CliHandler], list[str]]:
         """The `fulmen <cmd>` dispatch table: every plugin-registered
         command plus the aggregated resolution problems (§13.1, §24)."""
@@ -619,12 +703,16 @@ class Fulmen:
         # Group scopes only matter to the native declaration; the
         # document sees the joined paths either way.
         self._resolve_app_settings()
-        specs, problems = self._route_specs({id(app): 0 for app, _b, _c in walked}, plan, walked)
-        all_problems = plan.problems + problems
+        graph = self._provider_graph(plan)
+        specs, problems = self._route_specs(
+            {id(app): 0 for app, _b, _c in walked}, plan, walked, graph
+        )
+        all_problems = plan.problems + problems + graph.validate()
         if all_problems:
             raise _startup_error(all_problems)
         document = _openapi.generate(
-            self._api_info, [_route_entry(spec, meta) for spec, meta, _layers in specs]
+            self._api_info,
+            [_route_entry(spec, meta) for spec, meta, _layers, _route_di in specs],
         )
         component_problems = _plugins.merge_components(document, plan.components)
         if component_problems:
@@ -657,10 +745,27 @@ class Fulmen:
         scope_ids: dict[int, int] = {
             id(app): native.add_scope() for app, _b, _c in walked if app is not self
         }
-        specs, problems = self._route_specs(scope_ids, plan, walked)
-        problems = plan.problems + problems
-        for spec, _meta, layers in specs:
-            native.add_route((*spec, layers))
+        graph = self._provider_graph(plan)
+        specs, problems = self._route_specs(scope_ids, plan, walked, graph)
+        problems = plan.problems + problems + graph.validate()
+        # §12.1: request-context generator providers clean up after the
+        # response. Each route needing teardown gets a private hook scope
+        # appended to its layers, so its `after_response` cleanup hook
+        # fires for that route alone — routes without generators pay
+        # nothing (§8 cost model).
+        cleanup_scopes: list[tuple[int, bool]] = []
+        for spec, _meta, layers, route_di in specs:
+            route_layers = list(layers)
+            if route_di is not None and route_di.cleanup_lane is not None:
+                private = native.add_scope()
+                route_layers.append(private)
+                cleanup_scopes.append((private, route_di.cleanup_lane == "async"))
+            native.add_route((*spec, route_layers))
+        # §12.1: APP providers resolve once at startup, ahead of plugin
+        # and application startup hooks, so every hook sees initialized
+        # dependencies.
+        if graph.startup_hook is not None:
+            native.add_lifecycle_hook("startup", graph.startup_hook, graph.startup_is_async)
         # §8/§13.2: plugin contributions register ahead of app hooks so
         # plugin hooks precede app hooks in each phase's (priority, seq)
         # ordering; each plugin's registrations take its owner's scope.
@@ -683,9 +788,22 @@ class Fulmen:
                 native.add_lifecycle_hook("startup", hook, is_async)
             for hook, is_async in app._on_shutdown:
                 native.add_lifecycle_hook("shutdown", hook, is_async)
+        # APP-scope generator providers close at shutdown, after user
+        # shutdown hooks (they may still use the resources).
+        if graph.shutdown_hook is not None:
+            native.add_lifecycle_hook("shutdown", graph.shutdown_hook, graph.shutdown_is_async)
+        for private, is_async in cleanup_scopes:
+            native.add_hook(
+                "after_response",
+                graph.cleanup_hook(is_async),
+                is_async,
+                "fulmen.di:cleanup",
+                _di.CLEANUP_PRIORITY,
+                private,
+            )
         if problems:
             raise _startup_error(problems)
-        self._serve_docs(native, [(spec, meta) for spec, meta, _layers in specs], plan)
+        self._serve_docs(native, [(spec, meta) for spec, meta, _layers, _di_route in specs], plan)
         return native
 
     def _route_specs(
@@ -693,14 +811,20 @@ class Fulmen:
         scope_ids: dict[int, int],
         plan: _plugins.PluginPlan | None = None,
         walked: list[tuple[Fulmen, str, tuple[Fulmen, ...]]] | None = None,
-    ) -> tuple[list[tuple[_RouteSpec, _openapi.OperationMeta, list[int]]], list[str]]:
+        graph: _di.Graph | None = None,
+    ) -> tuple[
+        list[tuple[_RouteSpec, _openapi.OperationMeta, list[int], _di.RouteDi | None]], list[str]
+    ]:
         """Every declaration inspected into its `_RouteSpec` + doc meta +
-        group layers, plus the aggregated problem list. Plugin-declared
-        routes join after their owner app's own declarations."""
+        group layers + DI record, plus the aggregated problem list.
+        Plugin-declared routes join after their owner app's own
+        declarations."""
         if walked is None:
             walked = list(self._walk(extra_mounts=plan.extra_mounts if plan else None))
+        if graph is None:
+            graph = _di.Graph()
         plugin_routes = plan.route_decls() if plan is not None else {}
-        specs: list[tuple[_RouteSpec, _openapi.OperationMeta, list[int]]] = []
+        specs: list[tuple[_RouteSpec, _openapi.OperationMeta, list[int], _di.RouteDi | None]] = []
         problems: list[str] = []
         for app, base, chain in walked:
             layers = [scope_ids[id(group)] for group in chain]
@@ -709,15 +833,16 @@ class Fulmen:
                 *app._declared,
                 *plugin_routes.get(id(app), ()),
             ):
-                spec = _inspect_handler(
+                spec, route_di = _inspect_handler(
                     method,
                     _join_paths(base, path),
                     handler,
                     problems,
                     resolve_settings,
+                    graph,
                 )
                 if spec is not None:
-                    specs.append((spec, meta, layers))
+                    specs.append((spec, meta, layers, route_di))
         return specs, problems
 
     def _serve_docs(
@@ -752,6 +877,36 @@ class Fulmen:
             _add_static_route(native, taken, path, body, content_type)
 
 
+class _OverrideToken:
+    """The context manager `app.override()` returns — `__exit__` reverts
+    the substitution unless it was already reverted. A later `override()`
+    of the same marker supersedes the entry, which revert leaves alone."""
+
+    __slots__ = ("_map", "_original", "_replacement", "_reverted")
+
+    def __init__(
+        self, overrides: dict[object, object], original: object, replacement: object
+    ) -> None:
+        self._map = overrides
+        self._original = original
+        self._replacement = replacement
+        self._reverted = False
+
+    def revert(self) -> None:
+        """Remove this token's override — a no-op once it has been
+        reverted or superseded by a later `override()` of the same marker."""
+        if not self._reverted:
+            if self._map.get(self._original) is self._replacement:
+                del self._map[self._original]
+            self._reverted = True
+
+    def __enter__(self) -> _OverrideToken:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.revert()
+
+
 def _join_paths(prefix: str, path: str) -> str:
     """Join a mount prefix onto a declared route path (`"/api" + "/users"`)."""
     if not prefix:
@@ -771,20 +926,52 @@ def _inspect_handler(
     handler: _Handler,
     problems: list[str],
     resolve_settings: Callable[[type[Settings]], Settings],
-) -> _RouteSpec | None:
-    """Turn one recorded declaration into a `_RouteSpec`, or append a
-    problem and return `None`."""
+    graph: _di.Graph,
+) -> tuple[_RouteSpec | None, _di.RouteDi | None]:
+    """Turn one recorded declaration into a `_RouteSpec` plus the route's
+    DI record — `(None, …)` appends problems instead. Provider
+    parameters (`Annotated[T, provider]`/handle markers) leave the wire
+    call spec: the registered callable becomes a wrapper that resolves
+    them, so the route's spec, OpenAPI projection and path validation
+    only ever see wire parameters (§12.1)."""
     label = f"{method} {path} ({getattr(handler, '__qualname__', '<handler>')})"
     try:
         signature = inspect.signature(handler)
     except (TypeError, ValueError) as exc:
         problems.append(f"{label}: cannot inspect the handler signature: {exc}")
-        return None
+        return None, None
     try:
-        hints = typing.get_type_hints(handler, include_extras=True)
+        hints = typing.get_type_hints(handler, localns=_di.localns_of(handler), include_extras=True)
     except Exception as exc:  # noqa: BLE001 -- any hint-resolution failure is a startup problem
         problems.append(f"{label}: cannot resolve type hints: {exc}")
-        return None
+        return None, None
+
+    # §12.1: provider-marker parameters resolve through the DI graph —
+    # they never reach `param_spec`, so nothing about them lands on the
+    # wire spec or the OpenAPI projection.
+    route_di = _di.RouteDi()
+    di_names: set[str] = set()
+    for index, (name, parameter) in enumerate(signature.parameters.items()):
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        hinted = hints.get(name)
+        if hinted is None:
+            continue
+        picked = graph.marker_of(hinted)
+        if picked is None:
+            continue
+        base, marker = picked
+        where = f"{label} parameter `{name}`"
+        # The marker identified this as a DI parameter — wire inspection
+        # never sees it, even when the marker itself fails to resolve.
+        di_names.add(name)
+        key = graph.key_of(marker, base, where)
+        if key is not None:
+            positional = index if parameter.kind is inspect.Parameter.POSITIONAL_ONLY else None
+            route_di.bindings.append((name, key, positional))
 
     path_names = frozenset(_path_param_names(path))
     builder = _typing.SpecBuilder()
@@ -792,6 +979,8 @@ def _inspect_handler(
     injected: dict[str, Settings] = {}
     try:
         for name, parameter in signature.parameters.items():
+            if name in di_names:
+                continue
             if parameter.kind in (
                 inspect.Parameter.VAR_POSITIONAL,
                 inspect.Parameter.VAR_KEYWORD,
@@ -800,7 +989,7 @@ def _inspect_handler(
                     f"{label}: variadic parameter `{name}` is not supported; "
                     "handlers declare path, query, header, cookie, body or form parameters"
                 )
-                return None
+                return None, None
             hint = hints.get(name, inspect.Parameter.empty)
             base_hint = (
                 typing.get_args(hint)[0] if typing.get_origin(hint) is typing.Annotated else hint
@@ -849,19 +1038,19 @@ def _inspect_handler(
         # `AnnotationError` (a `ValueError`) and `compile_descriptor`'s
         # spec/compile `ValueError`s are all startup problems.
         problems.append(str(exc))
-        return None
+        return None, None
 
     path_infos = [info for info in infos if info.source == "path"]
     missing = [name for name in path_names if name not in {info.name for info in path_infos}]
     if missing:
         joined = ", ".join(f"`{name}`" for name in missing)
         problems.append(f"{label}: path parameter(s) {joined} are not bound by the handler")
-        return None
+        return None, None
 
     param_types = [
         (info.name, "int" if info.spec["kind"] == "int" else "str") for info in path_infos
     ]
-    call_args = [
+    call_args: list[_CallArg] = [
         (
             info.name,
             info.source,
@@ -875,6 +1064,15 @@ def _inspect_handler(
     is_async = inspect.iscoroutinefunction(handler)
     if injected:
         handler = _inject_settings(handler, injected, is_async)
+    if route_di.bindings:
+        # The wrapper takes the request first (native `request` source),
+        # resolves the DI parameters inside the handler's executor job,
+        # then calls through — one Python crossing for resolve+handle.
+        call_args.insert(0, _di.REQUEST_CALL_ARG)
+        handler = graph.wrap(handler, route_di, is_async)
+        graph.register_route(label, is_async, route_di)
+    else:
+        route_di = None
     return (
         method,
         path,
@@ -884,7 +1082,7 @@ def _inspect_handler(
         is_async,
         any(variant.status == 204 for variant in variants),
         response_descs,
-    )
+    ), route_di
 
 
 def _inject_settings(handler: _Handler, injected: dict[str, Settings], is_async: bool) -> _Handler:

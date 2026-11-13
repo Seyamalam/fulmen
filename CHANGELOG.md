@@ -123,6 +123,27 @@ exists. Move the `Unreleased` entries under the new version heading first.
   problem responses still behave exactly as in production.
   `AsyncTestClient` exposes the same surface as `async def` methods for
   `asyncio.run` tests.
+- Provider dependency injection (M3.10–M3.13, DESIGN.md §12):
+  `@provider(scope=…)` / `app.provide(fn_or_value, …)` declare providers
+  and `ctx.add_provider(…)` lets plugins feed the same graph;
+  `Annotated[T, provider]` (or a `PluginHandle`, or a bare provided-type
+  annotation) injects into handlers and recursively into other
+  providers. `Scope.APP` resolves once in a startup lifecycle hook,
+  `Scope.REQUEST` once per request cached on `request.state`, and
+  `Scope.TRANSIENT` at every injection site; sync/async generator
+  providers clean up in reverse order — request-scoped in a private
+  `after_response` lane, app-scoped at shutdown after user hooks. The
+  graph is built and fully validated at compile: cycles, missing or
+  ambiguous providers, `REQUEST`-into-`APP` scope violations,
+  async-in-sync violations, uninspectable signatures and unsupported
+  markers all aggregate into one `StartupError`. `Request` injects
+  natively through the dispatcher's `request`-sourced argument (no
+  Python call); everything else resolves inside the executor job, so
+  provider failures route through `on_error` and async providers run on
+  the asyncio loop. `app.override(original, replacement)` returns a
+  context-manager token for test overrides that re-validate under the
+  original's scope and restore cleanly. `Provider` and `Scope` are
+  public exports.
 
 ## [0.2.0] - 2026-11-12
 

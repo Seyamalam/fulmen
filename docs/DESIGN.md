@@ -769,7 +769,20 @@ async def get_user(user_id: int, users: Annotated[UserRepo, repo]) -> User: ...
 
 - Scopes: `APP` (once, at startup), `REQUEST` (once per request, cached
   within it), `TRANSIENT` (every injection).
-- Generator providers run cleanup after the response is sent, in reverse order.
+- `app.provide(fn_or_value, scope=…, provides=…, name=…)` registers a
+  provider imperatively; `ctx.add_provider(…)` does the same inside a
+  plugin's `setup()`. Callables default to `REQUEST` scope; plain values
+  are `APP`-scoped constants. `provides=` overrides the type key when
+  the return annotation isn't the lookup type.
+- Injection markers: `Annotated[T, provider_decl]` where the marker is a
+  `Provider`/`@provider` function or a `PluginHandle` (`Annotated[T,
+  auth]`); a bare provided-type annotation (`settings: Settings`)
+  resolves through the provides registry; `Request` alone injects the
+  request object natively (no Python provider call), and `request.state`
+  is reachable through it.
+- Generator providers run cleanup after the response is sent, in reverse
+  order (`APP`-scoped generators instead run at shutdown, after user
+  `on_shutdown` hooks). Async generators clean up on the asyncio loop.
 - Native providers (plugins written in Rust, such as `jwt`) are resolved
   without entering Python. Their output is converted only if the handler asks for it.
 
@@ -782,6 +795,11 @@ used from sync-only contexts are startup errors.
 ### 12.3 Overrides
 
 `app.override(database, fake_database)` replaces a provider, for tests.
+It returns a context-manager token — `revert()` (or `with` exit)
+restores the original without touching later overrides of the same
+provider. Replacements inherit the original's scope and take part in
+the same compile-time checks, so overriding a provider another provider
+depends on stays consistent.
 
 ## 13. Plugins
 

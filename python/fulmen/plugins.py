@@ -368,6 +368,9 @@ class PluginContext:
 
         def decorator(handler: _Handler) -> _Handler:
             self._ensure_open()
+            from fulmen import _di
+
+            _di.stamp_localns(handler)
             for method in methods:
                 self._routes.append((method.upper(), path, handler, meta))
             return handler
@@ -435,8 +438,14 @@ class PluginContext:
 
     def add_provider(self, provider: object) -> object:
         """Append a provider declaration to `ctx.providers`; returns it
-        for decorator use (`@ctx.add_provider`)."""
+        for decorator use (`@ctx.add_provider`).
+
+        The declaration's type hints resolve against `setup()`'s locals
+        (`Annotated[T, name]` works for providers defined inside setup)."""
+        from fulmen import _di
+
         self._ensure_open()
+        _di.stamp_localns(provider)
         self._providers.append(provider)
         return provider
 

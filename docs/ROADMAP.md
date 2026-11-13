@@ -227,10 +227,10 @@ injection with scopes, adapter interfaces, native plugin SDK (unstable ABI),
 
 ### Dependency injection
 
-- [ ] M3.10 `@provider` with `APP`, `REQUEST`, `TRANSIENT` scopes; generator cleanup
-- [ ] M3.11 Graph resolution at startup: cycles, missing providers, scope violations
-- [ ] M3.12 Native providers resolved without entering Python
-- [ ] M3.13 `app.override()` for tests
+- [x] M3.10 `@provider` with `APP`, `REQUEST`, `TRANSIENT` scopes; generator cleanup — `fulmen._di.{Provider,Scope,provider,Graph}`; `APP` resolves once in a startup hook, `REQUEST` once per request (cached on `request.state`), `TRANSIENT` per injection site; sync/async generators clean up in `after_response` (request scope) or `on_shutdown` (app scope), reverse order
+- [x] M3.11 Graph resolution at startup: cycles, missing providers, scope violations — cycles, missing/ambiguous providers, `REQUEST`-into-`APP` scope violations, async-from-sync violations, bad markers/signatures all aggregate into `StartupError` at compile
+- [x] M3.12 Native providers resolved without entering Python — `Request` annotates via the dispatcher's `request`-sourced arg (no Python provider call); all other providers run through the executors. Rust-plugin providers land with the M3.14–17 native ABI
+- [x] M3.13 `app.override()` for tests — `app.override(original, replacement)` returns a context-manager token; overrides re-normalize the graph entry under the original's scope and validate at compile; dependents see the replacement
 
 ### Native plugins
 

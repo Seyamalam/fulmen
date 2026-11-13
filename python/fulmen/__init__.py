@@ -2,6 +2,7 @@
 
 import typing
 
+from fulmen._di import Provider, Scope, provider
 from fulmen._fulmen import StartupError, __version__, native_components
 from fulmen.app import HOOK_PHASES, PRIORITY_SECURITY, PRIORITY_SYSTEM, PRIORITY_USER, Fulmen
 from fulmen.constraints import (
@@ -149,6 +150,7 @@ __all__ = [
     "PluginContext",
     "PluginHandle",
     "PreconditionFailed",
+    "Provider",
     "PydanticValidator",
     "Query",
     "Range",
@@ -157,6 +159,7 @@ __all__ = [
     "Request",
     "RequestTimeout",
     "Response",
+    "Scope",
     "Secret",
     "ServiceUnavailable",
     "Settings",
@@ -176,4 +179,5 @@ __all__ = [
     "ValidationError",
     "__version__",
     "native_components",
+    "provider",
 ]
