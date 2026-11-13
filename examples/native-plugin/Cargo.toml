@@ -1,0 +1,24 @@
+[package]
+name = "fulmen-example-plugin"
+description = "Example Fulmen native plugin: injects X-Request-Id on every response."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "fulmen_example_plugin"
+# `cdylib` is what `app.use(NativePlugin("..."))` loads; `rlib` keeps it
+# usable as a Rust dependency in tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fulmen-plugin-sdk = { workspace = true }
+# `config` arrives as JSON (DESIGN.md §13.4) — the idiomatic parse.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

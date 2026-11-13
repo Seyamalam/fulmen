@@ -18,6 +18,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 pyo3 = { workspace = true }
 fulmen-core = { workspace = true }
+# The native-plugin ABI loader (DESIGN.md §13.4) — all unsafe lives in the
+# SDK; fulmen-py only passes the capsule pointer through.
+fulmen-plugin-sdk = { workspace = true }
 fulmen-schema = { workspace = true }
 fulmen-security = { workspace = true }
 fulmen-server = { workspace = true }

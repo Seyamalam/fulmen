@@ -1,0 +1,23 @@
+[package]
+name = "fulmen-plugin-sdk"
+description = "SDK for writing Fulmen native plugins (Rust hooks in the request pipeline)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `http` and `bytes` are the wire types the host-side view builders adapt —
+# they never cross the ABI boundary, they only name what the shims reach.
+http.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+# The ABI tests exercise `HookArgs`/`ResponseMut` against the real types.
+http.workspace = true
+bytes.workspace = true
+
+[lints]
+workspace = true
