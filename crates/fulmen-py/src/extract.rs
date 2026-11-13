@@ -417,27 +417,27 @@ fn validate_param(
     limits: &Limits,
 ) -> Option<ParamValue> {
     match &arg.schema {
-        Some(schema) => match schema.validator.validate_out_with_limits(
-            raw,
-            arg.source.schema(),
-            mode,
-            limits,
-        ) {
-            Ok(Checked::Same(_)) => Some(ParamValue::Validated {
-                desc: Arc::clone(&schema.desc),
-                value: own_value(raw),
-            }),
-            Ok(Checked::New(v)) => Some(ParamValue::Validated {
-                desc: Arc::clone(&schema.desc),
-                value: own_value(&v),
-            }),
-            Err(errs) => {
-                for entry in errs.entries() {
-                    errors.push(relocated(arg, entry));
+        Some(schema) => {
+            match schema
+                .validator
+                .validate_out_with_limits(raw, arg.source.schema(), mode, limits)
+            {
+                Ok(Checked::Same(_)) => Some(ParamValue::Validated {
+                    desc: Arc::clone(&schema.desc),
+                    value: own_value(raw),
+                }),
+                Ok(Checked::New(v)) => Some(ParamValue::Validated {
+                    desc: Arc::clone(&schema.desc),
+                    value: own_value(&v),
+                }),
+                Err(errs) => {
+                    for entry in errs.entries() {
+                        errors.push(relocated(arg, entry));
+                    }
+                    None
                 }
-                None
             }
-        },
+        }
         None => Some(ParamValue::Wire(own_value(raw))),
     }
 }

@@ -46,8 +46,10 @@ mod _fulmen {
         )?;
         m.add_class::<crate::app::NativeApp>()?;
         m.add_class::<crate::descriptor::Descriptor>()?;
+        m.add_class::<crate::serve::DispatchClient>()?;
         m.add_class::<crate::serve::TestServer>()?;
         m.add_function(pyo3::wrap_pyfunction!(crate::serve::serve, m)?)?;
+        m.add_function(pyo3::wrap_pyfunction!(crate::serve::dispatch_for_test, m)?)?;
         m.add_function(pyo3::wrap_pyfunction!(crate::serve::serve_for_test, m)?)?;
         m.add_function(pyo3::wrap_pyfunction!(
             crate::descriptor::compile_descriptor,

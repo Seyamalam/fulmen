@@ -155,6 +155,46 @@ class AsyncPump:
     `loop.create_task` and `complete` is each task's done-callback. It is
     never registered on the module or constructed from Python."""
 
+class DispatchClient:
+    """An in-process client driving the compiled pipeline (tests only).
+
+    `request()` runs one request through routing, hooks, extraction,
+    handler, encoding and response hooks with no socket (§22).
+    `stop()` shuts the runtime down and runs `on_shutdown` hooks; it is
+    idempotent. Usable as a context manager."""
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        headers: list[tuple[str, str]],
+        body: bytes | None = None,
+    ) -> tuple[int, list[tuple[str, str]], bytes]:
+        """Dispatch `(method, path?query, headers, body)` through the
+        compiled pipeline; return `(status, headers, body)` — the same
+        triple a socket client observes (transport headers `date` and
+        `content-length` included)."""
+    def stop(self) -> None: ...
+    def __enter__(self) -> DispatchClient: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool: ...
+
+def dispatch_for_test(
+    app: NativeApp,
+    uvloop: bool | None = None,
+    debug: bool = False,
+) -> DispatchClient:
+    """Compile `app` and return a `DispatchClient` driving the pipeline
+    in-process — startup hooks run, no socket is opened (§22).
+
+    `uvloop` selects the asyncio loop implementation exactly like
+    `serve`; `debug` turns on §14.2 output validation.
+    Raises `StartupError` for declaration or executor problems."""
+
 class TestServer:
     """A running server bound to an ephemeral port (tests only).
 

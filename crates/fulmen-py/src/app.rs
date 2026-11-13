@@ -204,7 +204,13 @@ impl LimitSpec {
     /// §14.8's tightening-only rule. `owner`/`bound_name` name the
     /// parties so the startup error identifies field, owner, the bound
     /// value and the declared value.
-    fn check_tightened(&self, bound: &Limits, owner: &str, bound_name: &str, problems: &mut Vec<String>) {
+    fn check_tightened(
+        &self,
+        bound: &Limits,
+        owner: &str,
+        bound_name: &str,
+        problems: &mut Vec<String>,
+    ) {
         if let Some(declared) = self.max_depth {
             check_limit_field(
                 problems,
