@@ -827,6 +827,7 @@ decoration time, §5.6) and exposes `setup()`'s return value as
 - add routes and groups,
 - register providers (typed injection),
 - register native middleware (from a native plugin),
+- declare tighter request limits for its scope (`ctx.limits`, §14.8),
 - add OpenAPI components (security schemes, shared schemas),
 - add CLI commands (`fulmen <plugin> ...`),
 - add `fulmen check` rules,
@@ -966,6 +967,15 @@ In production mode, startup fails if:
 | Concurrent connections per worker | 10 000 | refuse |
 | HTTP/2 streams per connection | 100 | `REFUSED_STREAM` |
 
+*Status (M3.23):* the decoder bounds — `max_depth` (JSON depth),
+`max_items` (items per container) and `max_str_bytes` (unbounded by
+default) — are the first declarable limits: `Fulmen(limits=…)` sets them
+app-wide, `ctx.limits(…)` tightens them per plugin scope, and a route's
+effective bound is the tightest applicable declaration (§14.8). The
+transport limits (header/URL/body sizes, timeouts, sheds) stay
+`ServerConfig` defaults; per-route overrides and `max_body_bytes`
+declarations land with the limit-table work in M4.
+
 ### 14.4 Timeouts and load shedding
 
 | Timeout | Default |
@@ -1024,10 +1034,29 @@ Health endpoints bypass the queue.
 ### 14.8 Plugin isolation
 
 - A plugin can only touch the phases it declared in `setup()`. Registering a
-  hook after startup is an error.
+  hook after startup is an error — the `PluginContext` closes when `setup()`
+  returns, so a kept `ctx` refuses every registration, and the app tree
+  itself seals at compile.
 - Python plugin hooks that raise are treated as handler errors (500), with
-  the plugin name in the log.
-- Plugins cannot change limits set by the app; they can only make them stricter.
+  the plugin name in the log; hook names carry the `plugin:hook` form in
+  `fulmen routes` and error paths. A panicking native hook is contained at
+  the ABI boundary and answers `500`.
+- Plugins cannot change limits set by the app; they can only make them
+  stricter. *Status (M3.23, shipped):* `Fulmen(limits=…)` declares the
+  app's §14.3 decoder bounds (`max_depth`, `max_items`, `max_str_bytes`)
+  and `ctx.limits(…)` declares a plugin's tighter bound for the scope it
+  was `use()`d on — the whole app for `app.use()`, the group and its
+  children for `group.use()`. Every declaration is checked at compile:
+  a plugin field looser than the app's aggregates into `StartupError`
+  naming the field, the plugin and both values; an app value looser
+  than the §14.3 default is refused outright, and a mounted group's own
+  `limits=` is rejected so the bound is declared once, on the root.
+  The effective per-route bound (app ∧ every applicable scope
+  declaration) is baked into the route's compiled entry, so extraction
+  applies the tightest limit with no per-request scope lookup and
+  routes outside a plugin's scope keep the app's limits. Loosening past
+  the defaults — and per-route overrides — is the §14.3 limit-table work
+  planned for M4.1, not something a declaration can smuggle in.
 
 ## 15. Adapters
 
@@ -1311,11 +1340,18 @@ def test_create_user():
 
 - In-process: requests go straight into the native pipeline without sockets,
   so tests are fast and exercise exactly the production code path.
-  *Status (M3.21):* the native dispatcher is not yet exposed as a
-  socket-free entry point, so `TestClient`/`AsyncTestClient` drive the
-  same compiled app on an ephemeral loopback port via `serve_for_test` —
-  every request still exercises the real router, hooks, extractors and
-  error routing. A true in-process `dispatch` hook is a native follow-up.
+  *Status (M3.21, shipped):* `dispatch_for_test`/`DispatchClient` are the
+  socket-free entry point — the app compiles once exactly like
+  `serve_for_test`, then `DispatchClient.request(method, path, headers,
+  body)` drives `PyDispatcher::dispatch` on a one-worker tokio runtime and
+  returns `(status, headers, body)`. The full §8 pipeline runs — routing,
+  hooks, guards, extraction, DI, handler, encoding, response hooks, error
+  routing — with no listener or HTTP framing; the wire `remote_addr` reads
+  `127.0.0.1:0`, and `date`/`content-length` are added when absent so the
+  response matches what a socket client observes. `TestClient`/
+  `AsyncTestClient` prefer it; `use_sockets=True` is the escape hatch back
+  to `serve_for_test` loopback (the `serve` fixture keeps the real-server
+  path for tests that need a bound port).
 - Sync and async clients, WebSocket client, provider overrides, frozen clock.
   *Status (M3.21):* `TestClient` and `AsyncTestClient` cover HTTP
   (`.get/.post/.put/.patch/.delete/.head/.options`, `params`/`data`/`json`/

@@ -247,19 +247,19 @@ injection with scopes, adapter interfaces, native plugin SDK (unstable ABI),
 
 ### Testing
 
-- [x] M3.21 `TestClient` (sync and async), in-process native path, lifecycle hooks, `raise_server_errors` — `fulmen.testing.TestClient`/`AsyncTestClient` drive the compiled app via `serve_for_test` on an ephemeral loopback port (a socket-free native dispatch entry point does not exist yet — flagged in DESIGN.md §22); lifecycle hooks run on enter/exit, `raise_server_errors` re-raises unhandled exceptions through a `BaseException` `on_error` fallback
+- [x] M3.21 `TestClient` (sync and async), in-process native path, lifecycle hooks, `raise_server_errors` — `fulmen.testing.TestClient`/`AsyncTestClient` drive the compiled app through `dispatch_for_test`, the socket-free `DispatchClient` entry point that runs the same compiled pipeline with no listener (§22); `use_sockets=True` keeps `serve_for_test` loopback as the escape hatch (the `serve` fixture's real-server path); lifecycle hooks run on enter/exit, `raise_server_errors` re-raises unhandled exceptions through a `BaseException` `on_error` fallback
 - [x] M3.22 `Settings` with `Secret[str]`, source precedence, validation at startup (DESIGN.md §20) — `fulmen.settings.Settings`/`Secret`; defaults < `fulmen.toml` `[tool.fulmen.<section>]` < opt-in `env_file` < env vars < constructor kwargs; `Secret` masks `str`/`repr`/`format`; descriptor-validated at compile into one `StartupError` per app, injectable via `Fulmen(settings=…)` and `settings: AppSettings` handler params
 
 ### Guardrails added in M3
 
-- [ ] M3.23 Plugin isolation checks and startup validation (DESIGN.md §14.1, §14.8)
+- [x] M3.23 Plugin isolation checks and startup validation (DESIGN.md §14.1, §14.8) — `PluginContext` seals after setup, `plugin:hook` names every hook contribution in error paths, panics become 500s (Python hooks via executor error routing, native via `catch_unwind`); `Fulmen(limits=)`/`ctx.limits` declare tighten-only §14.3 bounds — a plugin field looser than the app's aggregates into `StartupError` naming the field, plugin and both values; `compile_app` bakes the effective per-route bound into `HandlerEntry` so extraction picks the tightest applicable limit and unscoped routes are unaffected
 - [x] M3.24 ABI compatibility test: plugin built against SDK N loads in Fulmen N, refused by a bumped ABI — `crates/fulmen-plugin-sdk/tests/abi.rs` round-trips the descriptor through the real `LoadedPlugin` path and asserts `abi_version == FULMEN_PLUGIN_ABI`; the `fulmen_plugin_v1_bad` export (abi_version 9999) is refused with `expected 1, found 9999` — also exercised end-to-end from Python (`python/tests/test_native_plugin.py`)
 
 ### Exit criteria
 
-- All M4/M5 features can be written using only the public plugin API (verified by a design review of their specs).
-- A route with three native plugins and no Python hooks has the same crossing count as a bare route (one).
-- Native plugin overhead under 1 µs per request in micro benchmarks.
+- All M4/M5 features can be written using only the public plugin API (verified by a design review of their specs) — **PASS**: the capability map in `benches/results/0.3.0.md` §a maps every M4–M6 need (security middleware, scoped policies, adapters, DI extension, OpenAPI/CLI/check contribution, native fast-path hooks, introspection) onto the shipped public surfaces; the only gaps are documented unshipped features (WebSocket/SSE phases, the M4.1 limit-table fields), not missing seams.
+- A route with three native plugins and no Python hooks has the same crossing count as a bare route (one) — **PASS**: `fulmen routes --cost` on a route staging three native `on_response` hooks reports `cost: 1 crossings`; asserted by `test_native_only_route_costs_one_crossing`/`test_cli_routes_reports_native_chain` (`benches/results/0.3.0.md` §b).
+- Native plugin overhead under 1 µs per request in micro benchmarks — **PASS**: `cargo bench -p fulmen-bench -- native_plugin` — 17.4 ns for the no-op `on_request` crossing, 191.2 ns for the request-id `on_response` hook (§c).
 
 ---
 
