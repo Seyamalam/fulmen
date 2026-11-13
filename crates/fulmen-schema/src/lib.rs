@@ -60,12 +60,13 @@ pub use errors::{
     ErrorCode, ErrorEntry, LocSeg, MAX_ERRORS, ProblemEntry, Source, ValidationErrors,
 };
 pub use json::{
-    DecodeError, JsonError, JsonErrorCode, PayloadError, decode_and_validate, decode_json,
-    decode_json_with_limits,
+    DecodeError, JsonError, JsonErrorCode, PayloadError, decode_and_validate,
+    decode_and_validate_with_limits, decode_json, decode_json_with_limits,
 };
 pub use sources::{
     SourceError, TextError, TextErrorCode, decode_cookie, decode_cookie_with_limits, decode_form,
     decode_form_with_limits, decode_query, decode_query_with_limits, validate_text,
+    validate_text_with_limits,
 };
 pub use validator::{Checked, Mode, Validator};
 pub use value::{LiteralValue, Value};

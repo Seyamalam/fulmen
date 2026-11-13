@@ -121,10 +121,28 @@ impl Validator {
         source: Source,
         mode: Mode,
     ) -> Result<Checked<'v, 'i>, ValidationErrors> {
+        self.validate_out_with_limits(input, source, mode, &self.limits)
+    }
+
+    /// `validate_out` under `limits`, never looser than the compiled-in
+    /// set: the walk enforces `self.limits.tightened(limits)` (DESIGN.md
+    /// §14.8 — a caller can only make validation stricter, never looser).
+    ///
+    /// # Errors
+    ///
+    /// Same contract as [`Validator::validate`].
+    pub fn validate_out_with_limits<'v, 'i>(
+        &self,
+        input: &'v Value<'i>,
+        source: Source,
+        mode: Mode,
+        limits: &Limits,
+    ) -> Result<Checked<'v, 'i>, ValidationErrors> {
+        let effective = self.limits.tightened(limits);
         let mut ctx = Ctx {
             source,
             mode,
-            limits: &self.limits,
+            limits: &effective,
             depth: 0,
             loc: Vec::new(),
             errs: ValidationErrors::new(),
