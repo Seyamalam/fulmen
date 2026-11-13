@@ -682,8 +682,8 @@ def test_injected_settings_wrapper_runs_handler() -> None:
 
     specs, problems = app._route_specs({})
     assert problems == []
-    sync_spec = next(spec for spec, _m, _l in specs if spec[1] == "/sync")
-    async_spec = next(spec for spec, _m, _l in specs if spec[1] == "/async")
+    sync_spec = next(spec for spec, _m, _l, _d in specs if spec[1] == "/sync")
+    async_spec = next(spec for spec, _m, _l, _d in specs if spec[1] == "/async")
     wrapped = sync_spec[4]
     assert wrapped(q="hi") == "hi:7"
 
