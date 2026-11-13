@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "date": "2026-11-12 22:39:23 +0600",
+    "date": "2026-11-13 13:46:07 +0600",
     "hardware": "Apple M5 Pro, 18 cores",
     "os": "Darwin 25.6.0 (Darwin Kernel Version 25.6.0: Fri Jul 31 19:19:08 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6050)",
     "python": "3.12.13",
@@ -12,9 +12,10 @@
       "litestar": "2.25.0",
       "robyn": "0.88.0",
       "flask": "3.1.3",
-      "gunicorn": "27.0.0",
+      "gunicorn": "27.0.1",
       "uvloop": "0.22.1",
-      "fulmen": "0.1.0"
+      "fulmen": "0.2.0",
+      "pydantic": "2.14.3"
     },
     "workers": 12,
     "connections": 100,
@@ -23,275 +24,55 @@
     "command": "python benches/e2e/run.py --apps fulmen,fulmen_async,fulmen_pydantic,ceiling"
   },
   "results": {
-    "fastapi": {
-      "plaintext": {
-        "requests_per_sec": 63093.01424717111,
-        "p50_ms": 1.509083,
-        "p99_ms": 3.094834,
-        "requests": 631148,
-        "status_codes": {
-          "200": 631148
-        },
-        "errors": {}
-      },
-      "json": {
-        "requests_per_sec": 39992.17258783729,
-        "p50_ms": 2.4833339999999997,
-        "p99_ms": 4.880167,
-        "requests": 400122,
-        "status_codes": {
-          "200": 400122
-        },
-        "errors": {}
-      },
-      "item": {
-        "requests_per_sec": 38731.38208860311,
-        "p50_ms": 2.477792,
-        "p99_ms": 4.701084000000001,
-        "requests": 387478,
-        "status_codes": {
-          "200": 387478
-        },
-        "errors": {}
-      },
-      "validated": {
-        "requests_per_sec": 34801.80891633877,
-        "p50_ms": 2.710833,
-        "p99_ms": 5.340291,
-        "requests": 348177,
-        "status_codes": {
-          "200": 348177
-        },
-        "errors": {},
-        "python_calls": 38343
-      },
-      "reject": {
-        "requests_per_sec": 79430.66109822775,
-        "p50_ms": 1.187083,
-        "p99_ms": 3.1202080000000003,
-        "requests": 794616,
-        "status_codes": {
-          "422": 794616
-        },
-        "errors": {},
-        "python_calls": 0
-      }
-    },
-    "litestar": {
-      "plaintext": {
-        "requests_per_sec": 130167.0075270942,
-        "p50_ms": 0.745958,
-        "p99_ms": 1.3889580000000001,
-        "requests": 1302095,
-        "status_codes": {
-          "200": 1302095
-        },
-        "errors": {}
-      },
-      "json": {
-        "requests_per_sec": 132399.30014852132,
-        "p50_ms": 0.736417,
-        "p99_ms": 1.150875,
-        "requests": 1324524,
-        "status_codes": {
-          "200": 1324524
-        },
-        "errors": {}
-      },
-      "item": {
-        "requests_per_sec": 132041.62077546236,
-        "p50_ms": 0.726167,
-        "p99_ms": 1.375041,
-        "requests": 1320969,
-        "status_codes": {
-          "200": 1320969
-        },
-        "errors": {}
-      },
-      "validated": {
-        "requests_per_sec": 125643.26535263885,
-        "p50_ms": 0.741375,
-        "p99_ms": 1.842375,
-        "requests": 1257304,
-        "status_codes": {
-          "201": 1257304
-        },
-        "errors": {}
-      },
-      "reject": {
-        "requests_per_sec": 112551.93885934842,
-        "p50_ms": 0.813542,
-        "p99_ms": 2.7850829999999998,
-        "requests": 1125859,
-        "status_codes": {
-          "400": 1125859
-        },
-        "errors": {}
-      }
-    },
-    "robyn": {
-      "plaintext": {
-        "requests_per_sec": 126799.41809703235,
-        "p50_ms": 0.780667,
-        "p99_ms": 1.017208,
-        "requests": 1268478,
-        "status_codes": {
-          "200": 1268478
-        },
-        "errors": {}
-      },
-      "json": {
-        "requests_per_sec": 129843.26047234923,
-        "p50_ms": 0.761459,
-        "p99_ms": 1.015416,
-        "requests": 1298928,
-        "status_codes": {
-          "200": 1298928
-        },
-        "errors": {}
-      },
-      "item": {
-        "requests_per_sec": 130400.91036152041,
-        "p50_ms": 0.758875,
-        "p99_ms": 0.977833,
-        "requests": 1304408,
-        "status_codes": {
-          "200": 1304408
-        },
-        "errors": {}
-      },
-      "validated": {
-        "requests_per_sec": 131402.7039314909,
-        "p50_ms": 0.727125,
-        "p99_ms": 1.299583,
-        "requests": 1314457,
-        "status_codes": {
-          "200": 1314457
-        },
-        "errors": {}
-      },
-      "reject": {
-        "requests_per_sec": 130347.90164835851,
-        "p50_ms": 0.730375,
-        "p99_ms": 1.215167,
-        "requests": 1304001,
-        "status_codes": {
-          "200": 1304001
-        },
-        "errors": {}
-      }
-    },
-    "flask": {
-      "plaintext": {
-        "requests_per_sec": 2625.635843231292,
-        "p50_ms": 4035.480833,
-        "p99_ms": 5753.862917,
-        "requests": 256,
-        "status_codes": {
-          "200": 256
-        },
-        "errors": {
-          "Can't assign requested address (os error 49)": 26044
-        }
-      },
-      "json": {
-        "requests_per_sec": 2621.7575230865345,
-        "p50_ms": 1872.9732079999999,
-        "p99_ms": 6882.7535419999995,
-        "requests": 220,
-        "status_codes": {
-          "200": 220
-        },
-        "errors": {
-          "Can't assign requested address (os error 49)": 26038
-        }
-      },
-      "item": {
-        "requests_per_sec": 3773.6132798628078,
-        "p50_ms": 9.199041999999999,
-        "p99_ms": 1687.504458,
-        "requests": 15960,
-        "status_codes": {
-          "200": 15960
-        },
-        "errors": {
-          "Can't assign requested address (os error 49)": 21826
-        }
-      },
-      "validated": {
-        "requests_per_sec": 2494.7721011091276,
-        "p50_ms": 1622.5333750000002,
-        "p99_ms": 6057.224999999999,
-        "requests": 217,
-        "status_codes": {
-          "200": 217
-        },
-        "errors": {
-          "Can't assign requested address (os error 49)": 24766
-        }
-      },
-      "reject": {
-        "requests_per_sec": 3612.3019553343756,
-        "p50_ms": 9.352334,
-        "p99_ms": 1589.405417,
-        "requests": 15997,
-        "status_codes": {
-          "200": 15997
-        },
-        "errors": {
-          "Can't assign requested address (os error 49)": 20182
-        }
-      }
-    },
     "fulmen": {
       "plaintext": {
-        "requests_per_sec": 73598.75405273649,
-        "p50_ms": 0.396875,
-        "p99_ms": 10.344375,
-        "requests": 736444,
+        "requests_per_sec": 86967.78972336855,
+        "p50_ms": 0.362958,
+        "p99_ms": 7.083459,
+        "requests": 869912,
         "status_codes": {
-          "200": 736444
+          "200": 869912
         },
         "errors": {}
       },
       "json": {
-        "requests_per_sec": 82681.64282515798,
-        "p50_ms": 0.375666,
-        "p99_ms": 8.506667,
-        "requests": 827069,
+        "requests_per_sec": 85528.95216576097,
+        "p50_ms": 0.367292,
+        "p99_ms": 7.57575,
+        "requests": 855494,
         "status_codes": {
-          "200": 827069
+          "200": 855494
         },
         "errors": {}
       },
       "item": {
-        "requests_per_sec": 78477.07002047407,
-        "p50_ms": 0.396042,
-        "p99_ms": 8.807291,
-        "requests": 785106,
+        "requests_per_sec": 83535.01058321398,
+        "p50_ms": 0.377666,
+        "p99_ms": 7.518417,
+        "requests": 835627,
         "status_codes": {
-          "200": 785106
+          "200": 835627
         },
         "errors": {}
       },
       "validated": {
-        "requests_per_sec": 65796.89782855946,
-        "p50_ms": 0.465916,
-        "p99_ms": 11.432082999999999,
-        "requests": 658176,
+        "requests_per_sec": 73502.7047875122,
+        "p50_ms": 0.41375,
+        "p99_ms": 9.948458,
+        "requests": 735329,
         "status_codes": {
-          "200": 658176
+          "200": 735329
         },
         "errors": {},
-        "python_calls": 840908
+        "python_calls": 952188
       },
       "reject": {
-        "requests_per_sec": 132637.69867250387,
-        "p50_ms": 0.747458,
-        "p99_ms": 0.969791,
-        "requests": 1326813,
+        "requests_per_sec": 136388.3447972183,
+        "p50_ms": 0.7267079999999999,
+        "p99_ms": 0.925042,
+        "requests": 1364202,
         "status_codes": {
-          "422": 1326813
+          "422": 1364202
         },
         "errors": {},
         "python_calls": 0
@@ -311,53 +92,53 @@
     },
     "fulmen_async": {
       "plaintext": {
-        "requests_per_sec": 128968.79541529964,
-        "p50_ms": 0.762084,
-        "p99_ms": 1.182958,
-        "requests": 1290152,
+        "requests_per_sec": 135873.37153637636,
+        "p50_ms": 0.731541,
+        "p99_ms": 0.950916,
+        "requests": 1359165,
         "status_codes": {
-          "200": 1290152
+          "200": 1359165
         },
         "errors": {}
       },
       "json": {
-        "requests_per_sec": 131118.00599835583,
-        "p50_ms": 0.7560410000000001,
-        "p99_ms": 1.03725,
-        "requests": 1311543,
+        "requests_per_sec": 134689.61438353083,
+        "p50_ms": 0.737209,
+        "p99_ms": 0.9692080000000001,
+        "requests": 1347166,
         "status_codes": {
-          "200": 1311543
+          "200": 1347166
         },
         "errors": {}
       },
       "item": {
-        "requests_per_sec": 133230.75611594293,
-        "p50_ms": 0.743333,
-        "p99_ms": 1.020291,
-        "requests": 1332755,
+        "requests_per_sec": 136650.29539789222,
+        "p50_ms": 0.727833,
+        "p99_ms": 0.947875,
+        "requests": 1366877,
         "status_codes": {
-          "200": 1332755
+          "200": 1366877
         },
         "errors": {}
       },
       "validated": {
-        "requests_per_sec": 106461.55895319027,
-        "p50_ms": 0.9347500000000001,
-        "p99_ms": 1.377917,
-        "requests": 1064947,
+        "requests_per_sec": 117943.28093354609,
+        "p50_ms": 0.846667,
+        "p99_ms": 1.167958,
+        "requests": 1179739,
         "status_codes": {
-          "200": 1064947
+          "200": 1179739
         },
         "errors": {},
-        "python_calls": 1399621
+        "python_calls": 1532768
       },
       "reject": {
-        "requests_per_sec": 134949.1064900848,
-        "p50_ms": 0.734583,
-        "p99_ms": 0.94,
-        "requests": 1349829,
+        "requests_per_sec": 137473.43653060702,
+        "p50_ms": 0.722166,
+        "p99_ms": 0.895125,
+        "requests": 1375053,
         "status_codes": {
-          "422": 1349829
+          "422": 1375053
         },
         "errors": {},
         "python_calls": 0
@@ -377,53 +158,53 @@
     },
     "fulmen_pydantic": {
       "plaintext": {
-        "requests_per_sec": 82903.68962196138,
-        "p50_ms": 0.37366699999999997,
-        "p99_ms": 8.527666,
-        "requests": 829376,
+        "requests_per_sec": 86305.19909040634,
+        "p50_ms": 0.36537499999999995,
+        "p99_ms": 7.288208,
+        "requests": 863275,
         "status_codes": {
-          "200": 829376
+          "200": 863275
         },
         "errors": {}
       },
       "json": {
-        "requests_per_sec": 81039.26537058782,
-        "p50_ms": 0.38125000000000003,
-        "p99_ms": 8.962207999999999,
-        "requests": 810671,
+        "requests_per_sec": 85520.44535916421,
+        "p50_ms": 0.367333,
+        "p99_ms": 7.566624999999999,
+        "requests": 855466,
         "status_codes": {
-          "200": 810671
+          "200": 855466
         },
         "errors": {}
       },
       "item": {
-        "requests_per_sec": 75814.75954207449,
-        "p50_ms": 0.406542,
-        "p99_ms": 9.461458,
-        "requests": 758458,
+        "requests_per_sec": 84479.82849889724,
+        "p50_ms": 0.37358399999999997,
+        "p99_ms": 7.308209000000001,
+        "requests": 845049,
         "status_codes": {
-          "200": 758458
+          "200": 845049
         },
         "errors": {}
       },
       "validated": {
-        "requests_per_sec": 55351.8036187838,
-        "p50_ms": 0.5402910000000001,
-        "p99_ms": 16.383042,
-        "requests": 553753,
+        "requests_per_sec": 68623.34147590605,
+        "p50_ms": 0.42633299999999996,
+        "p99_ms": 14.295125,
+        "requests": 686482,
         "status_codes": {
-          "200": 553753
+          "200": 686482
         },
         "errors": {},
-        "python_calls": 722821
+        "python_calls": 881344
       },
       "reject": {
-        "requests_per_sec": 135772.3835642753,
-        "p50_ms": 0.729167,
-        "p99_ms": 0.953708,
-        "requests": 1358345,
+        "requests_per_sec": 137396.31853268354,
+        "p50_ms": 0.722167,
+        "p99_ms": 0.8957919999999999,
+        "requests": 1374473,
         "status_codes": {
-          "422": 1358345
+          "422": 1374473
         },
         "errors": {},
         "python_calls": 0
@@ -443,52 +224,52 @@
     },
     "ceiling": {
       "plaintext": {
-        "requests_per_sec": 142771.17199986638,
-        "p50_ms": 0.69625,
-        "p99_ms": 0.87,
-        "requests": 1428176,
+        "requests_per_sec": 146203.25160952393,
+        "p50_ms": 0.679666,
+        "p99_ms": 0.8244170000000001,
+        "requests": 1462385,
         "status_codes": {
-          "200": 1428176
+          "200": 1462385
         },
         "errors": {}
       },
       "json": {
-        "requests_per_sec": 140689.53181435537,
-        "p50_ms": 0.706041,
-        "p99_ms": 0.8859579999999999,
-        "requests": 1407424,
+        "requests_per_sec": 146521.53389019408,
+        "p50_ms": 0.6784169999999999,
+        "p99_ms": 0.8163330000000001,
+        "requests": 1465664,
         "status_codes": {
-          "200": 1407424
+          "200": 1465664
         },
         "errors": {}
       },
       "item": {
-        "requests_per_sec": 144499.97319540646,
-        "p50_ms": 0.6876249999999999,
-        "p99_ms": 0.8517079999999999,
-        "requests": 1445461,
+        "requests_per_sec": 145150.50625255253,
+        "p50_ms": 0.684584,
+        "p99_ms": 0.839459,
+        "requests": 1452021,
         "status_codes": {
-          "200": 1445461
+          "200": 1452021
         },
         "errors": {}
       },
       "validated": {
-        "requests_per_sec": 138758.19223164095,
-        "p50_ms": 0.713125,
-        "p99_ms": 0.918917,
-        "requests": 1388131,
+        "requests_per_sec": 139686.17212185878,
+        "p50_ms": 0.709958,
+        "p99_ms": 0.884958,
+        "requests": 1397248,
         "status_codes": {
-          "200": 1388131
+          "200": 1397248
         },
         "errors": {}
       },
       "reject": {
-        "requests_per_sec": 137951.92560334253,
-        "p50_ms": 0.7178749999999999,
-        "p99_ms": 0.927167,
-        "requests": 1380030,
+        "requests_per_sec": 140004.38266086648,
+        "p50_ms": 0.7085830000000001,
+        "p99_ms": 0.875292,
+        "requests": 1400340,
         "status_codes": {
-          "200": 1380030
+          "200": 1400340
         },
         "errors": {}
       }

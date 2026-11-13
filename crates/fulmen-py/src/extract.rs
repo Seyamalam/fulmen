@@ -17,8 +17,9 @@ use fulmen_core::{PathValue, RouteHit};
 use fulmen_schema::errors::{ErrorCode, ErrorEntry, LocSeg, ValidationErrors};
 use fulmen_schema::value::Value;
 use fulmen_schema::{
-    Checked, Mode, PayloadError, Source, decode_and_validate, decode_cookie, decode_form,
-    decode_query, validate_text,
+    Checked, Limits, Mode, PayloadError, Source, decode_and_validate_with_limits,
+    decode_cookie_with_limits, decode_form_with_limits, decode_json_with_limits,
+    decode_query_with_limits, validate_text_with_limits,
 };
 use fulmen_server::{Request, Response};
 use http::StatusCode;
@@ -99,6 +100,10 @@ struct Extraction<'r> {
     form: Option<Value<'r>>,
     /// The shared `Request` snapshot — `request`-sourced params borrow it.
     snapshot: Option<&'r Arc<RequestSnapshot>>,
+    /// The route's effective limits (§14.8): the app's declared bounds
+    /// tightened by the plugin limits covering this route — decoders
+    /// and validators both run under it.
+    limits: &'r Limits,
 }
 
 /// Build the call arguments for a route hit: decode each wire source
@@ -111,12 +116,16 @@ struct Extraction<'r> {
 ///
 /// `snapshot` is the request's shared `Request` snapshot — already built
 /// by the dispatcher when the handler declared a `request` parameter (it
-/// doubles as the object hooks receive).
+/// doubles as the object hooks receive). `limits` is the route's
+/// effective parsing bound set — the app's, tightened by any plugin
+/// limits covering the route (§14.8); every decoder and validator in
+/// this pass runs under it.
 pub(crate) fn extract_args(
     hit: &RouteHit<'_>,
     spec: &[CallSpecArg],
     request: &Request,
     snapshot: Option<&Arc<RequestSnapshot>>,
+    limits: &Limits,
 ) -> Extracted {
     let route = body_route(spec, request);
     if route == BodyRoute::Unsupported {
@@ -137,6 +146,7 @@ pub(crate) fn extract_args(
         cookie: None,
         form: None,
         snapshot,
+        limits,
     };
     let mut args: Vec<ParamArg> = Vec::with_capacity(spec.len());
     for arg in spec {
@@ -205,19 +215,31 @@ impl Extraction<'_> {
             PathValue::Int(i) => Value::Int(*i),
             PathValue::Str(s) => Value::str(s),
         };
-        Ok(validate_param(arg, &raw, Mode::Lax, &mut self.errors))
+        Ok(validate_param(
+            arg,
+            &raw,
+            Mode::Lax,
+            &mut self.errors,
+            self.limits,
+        ))
     }
 
     /// `?name=…` through the query source adapter (lax).
     fn query_value(&mut self, arg: &CallSpecArg) -> Result<Option<ParamValue>, Box<Response>> {
         if self.query.is_none() {
-            match decode_query(self.request.uri.query().unwrap_or("")) {
+            match decode_query_with_limits(self.request.uri.query().unwrap_or(""), self.limits) {
                 Ok(v) => self.query = Some(v),
                 Err(e) => return Err(malformed(&format!("malformed query string: {e}"))),
             }
         }
         let raw = self.query.as_ref().and_then(|o| o.get(&arg.wire_name));
-        Ok(validate_or_missing(arg, raw, Mode::Lax, &mut self.errors))
+        Ok(validate_or_missing(
+            arg,
+            raw,
+            Mode::Lax,
+            &mut self.errors,
+            self.limits,
+        ))
     }
 
     /// A request header (case-insensitive `wire_name`), validated as text
@@ -237,7 +259,12 @@ impl Extraction<'_> {
             return None;
         };
         match &arg.schema {
-            Some(schema) => match validate_text(text, &schema.validator, Source::Header) {
+            Some(schema) => match validate_text_with_limits(
+                text,
+                &schema.validator,
+                Source::Header,
+                self.limits,
+            ) {
                 Ok(out) => Some(ParamValue::Validated {
                     desc: Arc::clone(&schema.desc),
                     value: own_value(&out),
@@ -262,7 +289,7 @@ impl Extraction<'_> {
                 .get(COOKIE)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            match decode_cookie(header) {
+            match decode_cookie_with_limits(header, self.limits) {
                 Ok(v) => self.cookie = Some(v),
                 Err(e) => {
                     return Err(malformed(&format!("malformed cookie header: {e}")));
@@ -270,7 +297,13 @@ impl Extraction<'_> {
             }
         }
         let raw = self.cookie.as_ref().and_then(|o| o.get(&arg.wire_name));
-        Ok(validate_or_missing(arg, raw, Mode::Lax, &mut self.errors))
+        Ok(validate_or_missing(
+            arg,
+            raw,
+            Mode::Lax,
+            &mut self.errors,
+            self.limits,
+        ))
     }
 
     /// The request body — `bytes`/`Raw` takes the octets, everything else
@@ -278,7 +311,13 @@ impl Extraction<'_> {
     fn body_value(&mut self, arg: &CallSpecArg) -> Result<Option<ParamValue>, Box<Response>> {
         if arg.takes_raw() {
             let raw = Value::Bytes(Cow::Borrowed(&self.request.body[..]));
-            return Ok(validate_param(arg, &raw, Mode::Strict, &mut self.errors));
+            return Ok(validate_param(
+                arg,
+                &raw,
+                Mode::Strict,
+                &mut self.errors,
+                self.limits,
+            ));
         }
         if self.route != BodyRoute::Json || self.request.body.is_empty() {
             // Not a JSON body this route can use — the parameter was
@@ -286,7 +325,11 @@ impl Extraction<'_> {
             return Ok(missing_value(arg, &mut self.errors));
         }
         match &arg.schema {
-            Some(schema) => match decode_and_validate(&self.request.body, &schema.validator) {
+            Some(schema) => match decode_and_validate_with_limits(
+                &self.request.body,
+                &schema.validator,
+                self.limits,
+            ) {
                 Ok(out) => Ok(Some(ParamValue::Validated {
                     desc: Arc::clone(&schema.desc),
                     value: own_value(&out),
@@ -301,7 +344,7 @@ impl Extraction<'_> {
                     Ok(None)
                 }
             },
-            None => match fulmen_schema::decode_json(&self.request.body) {
+            None => match decode_json_with_limits(&self.request.body, self.limits) {
                 Ok(v) => Ok(Some(ParamValue::Wire(own_value(&v)))),
                 Err(e) => Err(malformed(&format!("malformed JSON body: {e}"))),
             },
@@ -315,7 +358,7 @@ impl Extraction<'_> {
         }
         if self.form.is_none() {
             match std::str::from_utf8(&self.request.body) {
-                Ok(text) => match decode_form(text) {
+                Ok(text) => match decode_form_with_limits(text, self.limits) {
                     Ok(v) => self.form = Some(v),
                     Err(e) => {
                         return Err(malformed(&format!("malformed form body: {e}")));
@@ -325,7 +368,13 @@ impl Extraction<'_> {
             }
         }
         let raw = self.form.as_ref().and_then(|o| o.get(&arg.wire_name));
-        Ok(validate_or_missing(arg, raw, Mode::Lax, &mut self.errors))
+        Ok(validate_or_missing(
+            arg,
+            raw,
+            Mode::Lax,
+            &mut self.errors,
+            self.limits,
+        ))
     }
 }
 
@@ -342,47 +391,53 @@ fn malformed(detail: &str) -> Box<Response> {
 
 /// `raw` is `Some` when the source supplied a value — validate it through
 /// the parameter's descriptor (or pass it through descriptor-free);
-/// `None` applies the missing semantics.
+/// `None` applies the missing semantics. `limits` is the route's
+/// effective bound set (§14.8).
 fn validate_or_missing(
     arg: &CallSpecArg,
     raw: Option<&Value<'_>>,
     mode: Mode,
     errors: &mut ValidationErrors,
+    limits: &Limits,
 ) -> Option<ParamValue> {
     match raw {
-        Some(value) => validate_param(arg, value, mode, errors),
+        Some(value) => validate_param(arg, value, mode, errors, limits),
         None => missing_value(arg, errors),
     }
 }
 
-/// Run `raw` through the parameter's compiled validator; every problem is
-/// collected into `errors` (relocated under the parameter's wire name).
+/// Run `raw` through the parameter's compiled validator under the
+/// route's effective limits; every problem is collected into `errors`
+/// (relocated under the parameter's wire name).
 fn validate_param(
     arg: &CallSpecArg,
     raw: &Value<'_>,
     mode: Mode,
     errors: &mut ValidationErrors,
+    limits: &Limits,
 ) -> Option<ParamValue> {
     match &arg.schema {
-        Some(schema) => match schema
-            .validator
-            .validate_out(raw, arg.source.schema(), mode)
-        {
-            Ok(Checked::Same(_)) => Some(ParamValue::Validated {
-                desc: Arc::clone(&schema.desc),
-                value: own_value(raw),
-            }),
-            Ok(Checked::New(v)) => Some(ParamValue::Validated {
-                desc: Arc::clone(&schema.desc),
-                value: own_value(&v),
-            }),
-            Err(errs) => {
-                for entry in errs.entries() {
-                    errors.push(relocated(arg, entry));
+        Some(schema) => {
+            match schema
+                .validator
+                .validate_out_with_limits(raw, arg.source.schema(), mode, limits)
+            {
+                Ok(Checked::Same(_)) => Some(ParamValue::Validated {
+                    desc: Arc::clone(&schema.desc),
+                    value: own_value(raw),
+                }),
+                Ok(Checked::New(v)) => Some(ParamValue::Validated {
+                    desc: Arc::clone(&schema.desc),
+                    value: own_value(&v),
+                }),
+                Err(errs) => {
+                    for entry in errs.entries() {
+                        errors.push(relocated(arg, entry));
+                    }
+                    None
                 }
-                None
             }
-        },
+        }
         None => Some(ParamValue::Wire(own_value(raw))),
     }
 }

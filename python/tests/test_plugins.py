@@ -7,10 +7,11 @@ group scoping, and post-compile sealing (§14.8).
 
 from __future__ import annotations
 
+import json
 from typing import ClassVar
 
 import pytest
-from conftest import fetch
+from conftest import HttpResponse, fetch
 from fulmen import Created, Fulmen, JSONResponse, Model, Request, StartupError
 from fulmen.cli import main
 
@@ -1025,3 +1026,193 @@ def test_sealed_context_rejects_remaining_registrations() -> None:
         ctx.on_startup(lambda: None)
     with pytest.raises(RuntimeError, match="context is closed"):
         ctx.on_shutdown(lambda: None)
+    with pytest.raises(RuntimeError, match="context is closed"):
+        ctx.limits(max_items=1)
+
+
+# -- plugin request limits (§14.3/§14.8, M3.23) ---------------------------------
+
+
+class _Limits:
+    """Toy plugin declaring `ctx.limits` from constructor kwargs."""
+
+    def __init__(self, name: str, **limits: int) -> None:
+        self.name = name
+        self.version = "1.0"
+        self._limits = limits
+
+    def setup(self, ctx):
+        ctx.limits(**self._limits)
+
+
+def _items_app(app: Fulmen, path: str = "/items") -> None:
+    """A JSON route echoing the body's list length — `max_items` probe."""
+
+    @app.post(path)
+    def items(body: dict) -> int:
+        return len(body["xs"])
+
+
+def _post(url: str, xs: list[int]) -> HttpResponse:
+    return fetch(
+        url,
+        method="POST",
+        data=json.dumps({"xs": xs}).encode(),
+        headers={"content-type": "application/json"},
+    )
+
+
+def test_app_limits_field_validation() -> None:
+    """`Fulmen(limits=…)` rejects bad shapes eagerly (§14.3)."""
+    with pytest.raises(ValueError, match="unknown limit 'max_body'"):
+        Fulmen(openapi_url=None, limits={"max_body": 10})
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        Fulmen(openapi_url=None, limits={"max_items": "5"})
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        Fulmen(openapi_url=None, limits={"max_items": True})
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        Fulmen(openapi_url=None, limits={"max_items": 0})
+
+
+def test_app_limits_looser_than_default_is_rejected() -> None:
+    """A declared app limit may not exceed its §14.3 default."""
+    with pytest.raises(
+        ValueError,
+        match=r"the app declares a looser `max_depth` limit: 128 exceeds the default 64",
+    ):
+        Fulmen(openapi_url=None, limits={"max_depth": 128})
+    with pytest.raises(ValueError, match=r"looser `max_items`.*exceeds the default 100000"):
+        Fulmen(openapi_url=None, limits={"max_items": 200_000})
+
+
+def test_app_limits_apply_to_requests(serve) -> None:
+    """A tightened app limit binds every route's decoding."""
+    app = Fulmen(openapi_url=None, limits={"max_items": 3})
+    _items_app(app)
+    base = serve(app)
+    assert _post(f"{base}/items", [1, 2]).status == 200
+    assert _post(f"{base}/items", [1, 2, 3, 4]).status == 422
+
+
+def test_ctx_limits_validation() -> None:
+    """`ctx.limits` validates values and merges repeated calls by min."""
+    seen: dict[str, int] = {}
+
+    class Merge:
+        name = "merge"
+        version = "1.0"
+
+        def setup(self, ctx):
+            with pytest.raises(ValueError, match="must be a positive integer"):
+                ctx.limits(max_items=0)
+            with pytest.raises(ValueError, match="must be a positive integer"):
+                ctx.limits(max_str_bytes=-1)
+            ctx.limits(max_items=8, max_depth=4)
+            ctx.limits(max_items=12)  # looser repeat keeps 8
+            ctx.limits(max_items=2)
+            seen.update(ctx.staged.limits)
+
+    app = _app()
+    app.use(Merge())
+    app._compile_native()
+    assert seen == {"max_items": 2, "max_depth": 4}
+
+
+def test_plugin_limits_tighten_their_group_scope_only(serve) -> None:
+    """A group-scoped plugin binds its group's routes, not the app's."""
+    app = _app()
+    group = Fulmen(prefix="/g", openapi_url=None)
+    group.use(_Limits("tight", max_items=3))
+    _items_app(group)
+    _items_app(app)
+    app.mount(group)
+    base = serve(app)
+    assert _post(f"{base}/g/items", [1, 2, 3, 4]).status == 422
+    assert _post(f"{base}/g/items", [1, 2]).status == 200
+    # The same payload on the unscoped root route is unaffected.
+    assert _post(f"{base}/items", [1, 2, 3, 4]).status == 200
+
+
+def test_app_scope_plugin_limits_cover_mounted_groups(serve) -> None:
+    """`app.use(p)` limits bind every route, mounted groups included."""
+    app = _app()
+    app.use(_Limits("tight", max_items=2))
+    group = Fulmen(prefix="/g", openapi_url=None)
+    _items_app(group)
+    _items_app(app)
+    app.mount(group)
+    base = serve(app)
+    assert _post(f"{base}/items", [1, 2, 3]).status == 422
+    assert _post(f"{base}/g/items", [1, 2, 3]).status == 422
+    assert _post(f"{base}/g/items", [1]).status == 200
+
+
+def test_plugin_limits_combine_with_app_limits(serve) -> None:
+    """Effective bound = app ∧ plugin, per field (§14.8)."""
+    app = Fulmen(openapi_url=None, limits={"max_items": 5, "max_depth": 8})
+    group = Fulmen(prefix="/g", openapi_url=None)
+    group.use(_Limits("tight", max_items=3))
+    _items_app(group)
+    _items_app(app)
+    app.mount(group)
+    base = serve(app)
+    # Scoped: plugin's 3 beats the app's 5.
+    assert _post(f"{base}/g/items", [1, 2, 3, 4]).status == 422
+    # Unscoped: the app's 5 applies.
+    assert _post(f"{base}/items", [1, 2, 3, 4]).status == 200
+    assert _post(f"{base}/items", [1, 2, 3, 4, 5, 6]).status == 422
+
+
+def test_plugin_limits_looser_than_app_is_a_startup_error() -> None:
+    """A plugin field looser than the app's names both values (§14.8)."""
+    app = Fulmen(openapi_url=None, limits={"max_items": 5})
+    app.use(_Limits("greedy", max_items=99))
+    with pytest.raises(
+        StartupError,
+        match=r"plugin `greedy` declares a looser `max_items` limit: 99 exceeds the app's 5",
+    ):
+        app._compile_native()
+
+
+def test_plugin_limits_looser_than_default_is_a_startup_error() -> None:
+    """With no app declaration, the §14.3 default is the bound."""
+    app = _app()
+    app.use(_Limits("greedy", max_depth=999))
+    with pytest.raises(
+        StartupError,
+        match=r"plugin `greedy` declares a looser `max_depth` limit: 999 exceeds the default 64",
+    ):
+        app._compile_native()
+
+
+def test_plugin_limits_loosening_fails_openapi_too() -> None:
+    """The check aggregates like every other declaration problem."""
+    app = Fulmen(openapi_url=None, limits={"max_items": 5})
+    app.use(_Limits("greedy", max_items=99))
+    with pytest.raises(StartupError, match="looser `max_items`"):
+        app.openapi()
+
+
+def test_mounted_group_limits_are_refused() -> None:
+    """`limits=` is declared once, on the root application."""
+    group = Fulmen(prefix="/g", openapi_url=None, limits={"max_items": 4})
+    app = _app()
+    app.mount(group)
+    with pytest.raises(StartupError, match="declared on the root application"):
+        app._compile_native()
+
+
+def test_plugin_limits_setup_problem_keeps_message_shape() -> None:
+    """A `ctx.limits` ValueError inside setup joins the setup problems."""
+
+    class Bad:
+        name = "bad"
+        version = "1.0"
+
+        def setup(self, ctx):
+            ctx.limits(max_items="nope")
+
+    app = _app()
+    app.use(Bad())
+    with pytest.raises(StartupError, match=r"plugin `bad`: setup\(\) failed"):
+        app._compile_native()

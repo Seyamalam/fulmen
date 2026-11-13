@@ -59,6 +59,21 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    /// The element-wise tighter bound of `self` and `other` — §14.8's
+    /// "plugins can only make limits stricter" merge: the result is
+    /// never looser than either input.
+    #[must_use]
+    pub fn tightened(&self, other: &Limits) -> Limits {
+        Limits {
+            max_depth: self.max_depth.min(other.max_depth),
+            max_items: self.max_items.min(other.max_items),
+            max_str_bytes: self.max_str_bytes.min(other.max_str_bytes),
+            max_desc_depth: self.max_desc_depth.min(other.max_desc_depth),
+        }
+    }
+}
+
 /// One problem found while compiling a descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
@@ -946,5 +961,28 @@ mod tests {
         }
         assert!(compile(&d).is_err()); // exceeds default max_desc_depth 64
         assert!(compile(&TypeDesc::list(TypeDesc::int())).is_ok());
+    }
+
+    #[test]
+    fn limits_tightened() {
+        let a = Limits {
+            max_depth: 8,
+            max_items: 5,
+            ..Limits::default()
+        };
+        let b = Limits {
+            max_depth: 64,
+            max_items: 3,
+            max_str_bytes: 7,
+            ..Limits::default()
+        };
+        let merged = a.tightened(&b);
+        assert_eq!(merged.max_depth, 8);
+        assert_eq!(merged.max_items, 3);
+        assert_eq!(merged.max_str_bytes, 7);
+        // Commutative, and never looser than either input (§14.8).
+        assert_eq!(merged, b.tightened(&a));
+        assert_eq!(a.tightened(&Limits::default()), a);
+        assert_eq!(Limits::default().tightened(&a), a);
     }
 }

@@ -109,6 +109,12 @@ class Fulmen:
     `500 application/problem+json` with the validation errors (the handler
     identity is logged). Serving flags (`run(debug=…)`, `--debug`) enable
     the same checks for an app built without the flag.
+
+    `limits` declares request-parsing bounds (§14.3): a mapping with any
+    of `max_depth`, `max_items`, `max_str_bytes`. Declared values apply
+    to every route and bound every plugin's `ctx.limits` declaration —
+    limits only tighten, so a value looser than a §14.3 default is a
+    startup error.
     """
 
     __slots__ = (
@@ -118,6 +124,7 @@ class Fulmen:
         "_docs_url",
         "_error_handlers",
         "_hooks",
+        "_limits",
         "_mounted",
         "_on_shutdown",
         "_on_startup",
@@ -147,6 +154,7 @@ class Fulmen:
         debug: bool = False,
         prefix: str = "",
         settings: type[Settings] | Settings | None = None,
+        limits: Mapping[str, int] | None = None,
     ) -> None:
         for name, url in (("openapi_url", openapi_url), ("docs_url", docs_url)):
             if url is not None and (not url.startswith("/") or '"' in url):
@@ -157,6 +165,16 @@ class Fulmen:
             raise ValueError(
                 f"prefix must be empty or `/…` without a trailing slash, got {prefix!r}"
             )
+        self._limits = _plugins._validate_limits(limits or {}, owner="the app")  # pyright: ignore[reportPrivateUsage] - same package
+        # §14.8's tightening rule applies to the app too: a declared
+        # bound may not exceed the §14.3 default for its field.
+        for field, declared in self._limits.items():
+            default = _plugins._DEFAULT_LIMITS[field]  # pyright: ignore[reportPrivateUsage] - same package
+            if declared > default:
+                raise ValueError(
+                    f"the app declares a looser `{field}` limit: "
+                    f"{declared} exceeds the default {default}"
+                )
         if settings is not None and not (
             isinstance(settings, Settings)
             or (isinstance(settings, type) and issubclass(settings, Settings))  # pyright: ignore[reportUnnecessaryIsInstance]
@@ -622,6 +640,13 @@ class Fulmen:
                     continue
                 seen.add(id(app))
                 discovered = True
+                # §14.8: the bound is declared once, on the root
+                # application — a mounted group's `limits=` is refused.
+                if app is not self and app._limits:
+                    plan.problems.append(
+                        f"mounted group `{app._prefix}` declares `limits` — "
+                        "request limits are declared on the root application"
+                    )
                 uses.extend(
                     _plugins.PluginUse(owner=app, plugin=plugin, handle=handle, meta=meta)
                     for plugin, handle, meta in app._plugins
@@ -668,6 +693,18 @@ class Fulmen:
         plan.problems.extend(setup_problems)
         plan.problems.extend(_plugins.order_integrity(plan.entries))
         plan.finish()
+        # §14.8: declared limits only tighten — each plugin field is
+        # checked against the app's (a §14.3 default when undeclared).
+        for use, ctx in plan.entries:
+            for field, declared in ctx.staged.limits.items():
+                allowed = self._limits.get(field)
+                bound = allowed if allowed is not None else _plugins._DEFAULT_LIMITS[field]  # pyright: ignore[reportPrivateUsage] - same package
+                if declared > bound:
+                    who = f"the app's {allowed}" if allowed is not None else f"the default {bound}"
+                    plan.problems.append(
+                        f"plugin `{use.meta.name}` declares a looser `{field}` limit: "
+                        f"{declared} exceeds {who}"
+                    )
         return plan
 
     def _provider_graph(self, plan: _plugins.PluginPlan) -> _di.Graph:
@@ -741,6 +778,10 @@ class Fulmen:
         # before a single route is registered.
         self._resolve_app_settings()
         native = NativeApp(debug=self._debug)
+        # §14.3/§14.8: the app's declared limits — the bound plugins can
+        # only tighten. Compile reports any field looser than a default.
+        if self._limits:
+            native.set_limits(**self._limits)
         # One group scope per mounted application; the app's own
         # registrations stay in the application scope (`0`).
         scope_ids: dict[int, int] = {
@@ -773,6 +814,11 @@ class Fulmen:
         for _use, ctx in plan.entries:
             staged = ctx.staged
             scope = 0 if staged.owner is self else scope_ids[id(staged.owner)]
+            # §14.8: plugin-declared limits bind the plugin's scope —
+            # compile checks every field against the app's before they
+            # apply to the scope's routes.
+            if staged.limits:
+                native.add_scope_limits(scope, _use.meta.name, **staged.limits)
             # §13.4: native descriptor capsules validate and load through
             # the same merge — an ABI mismatch or a failing plugin `setup`
             # aggregates like any other declaration problem. `ctx.config`

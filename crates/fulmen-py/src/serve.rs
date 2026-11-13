@@ -2,14 +2,18 @@
 //! [`serve_for_test`] gives tests a stoppable server on an ephemeral port.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
-use fulmen_server::ServerConfig;
-use pyo3::exceptions::PyValueError;
+use bytes::Bytes;
+use fulmen_server::{Dispatcher, ServerConfig};
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use tokio::runtime::Runtime;
 
 use crate::app::{BridgeConfig, LifecycleHook, NativeApp, compile_app, dispatcher};
 use crate::convert::log_message;
+use crate::dispatch::PyDispatcher;
 
 /// Compile `app` and serve it until the process is signalled (SIGINT/SIGTERM
 /// run the server's own graceful shutdown) or the server fails.
@@ -50,7 +54,7 @@ pub(crate) fn serve(
         debug,
     };
     let compiled = compile_app(py, &native, &config_bridge)?;
-    let logger = std::sync::Arc::clone(&compiled.inner.logger);
+    let logger = Arc::clone(&compiled.inner.logger);
     drop(native);
 
     // §5.7: `on_startup` fires after a successful compile, before bind.
@@ -177,7 +181,7 @@ pub(crate) fn serve_for_test(
         shutdown_timeout: Duration::from_secs(5),
         ..ServerConfig::default()
     };
-    let logger = std::sync::Arc::clone(&compiled.inner.logger);
+    let logger = Arc::clone(&compiled.inner.logger);
     run_lifecycle(py, &compiled.startup_hooks, "startup", &logger)?;
     let disp = dispatcher(&compiled);
     let server = py.detach(move || fulmen_server::serve(config, disp))?;
@@ -186,6 +190,190 @@ pub(crate) fn serve_for_test(
         server: Some(server),
         addr,
         shutdown_hooks: Some(compiled.shutdown_hooks),
+    })
+}
+
+/// The `(status, headers, body)` triple a dispatched request answers —
+/// the same shape a socket client observes off the wire.
+type WireResponse = (u16, Vec<(String, String)>, Vec<u8>);
+
+/// An in-process, socket-free dispatch client for tests (DESIGN.md §22).
+///
+/// Compiles the app once exactly like [`serve_for_test`], then drives
+/// `PyDispatcher::dispatch` on a small tokio runtime — every request
+/// runs the whole §8 pipeline (routing, hooks, guards, extraction,
+/// dependency resolution, handler, encoding, response hooks, error
+/// routing) with no listener, socket or HTTP framing. The wire
+/// `remote_addr` is fabricated as `127.0.0.1:0`; `date`/`content-length`
+/// are added to the response when absent, matching what the transport
+/// appends over a socket.
+#[pyclass(name = "DispatchClient", module = "fulmen._fulmen")]
+pub(crate) struct DispatchClient {
+    /// The compiled pipeline — its `Arc<AppInner>` keeps the executors
+    /// alive for the client's lifetime.
+    dispatcher: PyDispatcher,
+    /// `@app.on_shutdown` hooks, run once by `stop`.
+    shutdown_hooks: Option<Vec<LifecycleHook>>,
+    /// Drives each `DispatchFuture`; `None` after `stop`. One worker
+    /// thread is enough — `block_on` runs the request's own phases on
+    /// the caller; the worker only drains fire-and-forget settles.
+    runtime: Option<Runtime>,
+    /// `logging.getLogger("fulmen")` for the shutdown-hook log path.
+    logger: Arc<Py<PyAny>>,
+}
+
+#[pymethods]
+impl DispatchClient {
+    /// `request(method, path, headers, body)` → `(status, headers, body)`.
+    ///
+    /// `path` is the origin-form request target (`/items?x=1`);
+    /// `headers` is a list of `(name, value)` pairs so repeated headers
+    /// survive; `body` is `bytes` or `None`.
+    #[pyo3(signature = (method, path, headers, body=None))]
+    fn request(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        path: &str,
+        headers: Vec<(String, String)>,
+        body: Option<Vec<u8>>,
+    ) -> PyResult<WireResponse> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("DispatchClient is stopped"))?;
+        let method = http::Method::from_bytes(method.as_bytes())
+            .map_err(|_| PyValueError::new_err(format!("invalid HTTP method {method:?}")))?;
+        let uri: http::Uri = path
+            .parse()
+            .map_err(|_| PyValueError::new_err(format!("invalid request target {path:?}")))?;
+        let mut map = http::HeaderMap::with_capacity(headers.len());
+        for (name, value) in headers {
+            let name = http::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| PyValueError::new_err(format!("invalid header name {name:?}")))?;
+            let value = http::HeaderValue::from_str(&value)
+                .map_err(|_| PyValueError::new_err(format!("invalid value for header `{name}`")))?;
+            map.append(name, value);
+        }
+        let request = fulmen_server::Request {
+            method,
+            uri,
+            headers: map,
+            body: body.map_or_else(Bytes::new, Bytes::from),
+            // No peer exists without a socket; port `0` marks the
+            // fabricated loopback address.
+            remote_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        };
+        // The future is `Send + 'static`; `block_on` must not hold the GIL
+        // while it waits on executor completions.
+        let mut response = py.detach(|| runtime.block_on(self.dispatcher.dispatch(request)));
+        // The transport sets these on the wire (service.rs); repeat them
+        // so the tuple matches what a socket client observes.
+        let body_len = response.body.len();
+        if let Ok(value) = http::HeaderValue::from_str(&body_len.to_string()) {
+            response
+                .headers
+                .entry(http::header::CONTENT_LENGTH)
+                .or_insert(value);
+        }
+        response
+            .headers
+            .entry(http::header::DATE)
+            .or_insert_with(fulmen_server::date_header);
+        let headers: Vec<(String, String)> = response
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        Ok((response.status.as_u16(), headers, response.body.to_vec()))
+    }
+
+    /// Shut the runtime down and run `on_shutdown` hooks once. Idempotent.
+    fn stop(&mut self, py: Python<'_>) {
+        if let Some(runtime) = self.runtime.take() {
+            // The transport-analogue goes down before the lifecycle, like
+            // `TestServer.stop`: bound wait, then hooks.
+            py.detach(move || runtime.shutdown_timeout(Duration::from_secs(1)));
+        }
+        if let Some(hooks) = self.shutdown_hooks.take() {
+            let _ = run_lifecycle(py, &hooks, "shutdown", &self.logger);
+        }
+    }
+
+    /// `with dispatch_for_test(...) as client:` — returns `self`.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Context-manager exit: [`stop`](Self::stop).
+    fn __exit__(
+        &mut self,
+        py: Python<'_>,
+        _exc_type: &Bound<'_, PyAny>,
+        _exc: &Bound<'_, PyAny>,
+        _tb: &Bound<'_, PyAny>,
+    ) -> bool {
+        self.stop(py);
+        false
+    }
+}
+
+/// Compile `app` for in-process dispatch: the same compile and startup
+/// lifecycle as [`serve_for_test`], minus the listener (DESIGN.md §22).
+///
+/// The returned [`DispatchClient`] answers requests by running the
+/// compiled pipeline directly, so tests exercise production routing,
+/// hooks, extraction and error routing without opening a socket.
+///
+/// `uvloop` selects the asyncio loop implementation exactly like
+/// [`serve`]; `debug` turns on §11.6 output validation.
+///
+/// # Errors
+/// `StartupError` for declaration or executor problems.
+#[pyfunction]
+#[pyo3(signature = (app, uvloop=None, debug=false))]
+pub(crate) fn dispatch_for_test(
+    py: Python<'_>,
+    app: &Bound<'_, NativeApp>,
+    uvloop: Option<bool>,
+    debug: bool,
+) -> PyResult<DispatchClient> {
+    let native = app.borrow();
+    let compiled = compile_app(
+        py,
+        &native,
+        &BridgeConfig {
+            uvloop,
+            debug,
+            ..BridgeConfig::default()
+        },
+    )?;
+    drop(native);
+    let logger = Arc::clone(&compiled.inner.logger);
+    run_lifecycle(py, &compiled.startup_hooks, "startup", &logger)?;
+    // One worker thread: `block_on` runs each request's phases on the
+    // caller; the worker only drains fire-and-forget settles (e.g.
+    // `after_response`). Multi-thread so concurrent `request` calls
+    // from Python threads may `block_on` at once.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .map_err(|err| {
+            crate::app::StartupError::new_err(format!(
+                "failed to start the dispatch runtime: {err}"
+            ))
+        })?;
+    Ok(DispatchClient {
+        dispatcher: dispatcher(&compiled),
+        shutdown_hooks: Some(compiled.shutdown_hooks),
+        runtime: Some(runtime),
+        logger,
     })
 }
 

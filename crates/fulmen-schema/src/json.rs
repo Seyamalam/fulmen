@@ -262,8 +262,24 @@ pub fn decode_and_validate<'a>(
     bytes: &'a [u8],
     validator: &Validator,
 ) -> Result<Cow<'a, Value<'a>>, PayloadError> {
-    let input = decode_json_with_limits(bytes, validator.limits())?;
-    match validator.validate_out(&input, Source::Body, Mode::Strict) {
+    decode_and_validate_with_limits(bytes, validator, &Limits::default())
+}
+
+/// `decode_and_validate` under `limits`, tightened against the
+/// validator's compiled-in set — a caller-supplied bound can only make
+/// the pipeline stricter (DESIGN.md §14.8).
+///
+/// # Errors
+///
+/// Same contract as [`decode_and_validate`].
+pub fn decode_and_validate_with_limits<'a>(
+    bytes: &'a [u8],
+    validator: &Validator,
+    limits: &Limits,
+) -> Result<Cow<'a, Value<'a>>, PayloadError> {
+    let effective = validator.limits().tightened(limits);
+    let input = decode_json_with_limits(bytes, &effective)?;
+    match validator.validate_out_with_limits(&input, Source::Body, Mode::Strict, limits) {
         Ok(Checked::Same(_)) => Ok(Cow::Owned(input)),
         Ok(Checked::New(v)) => Ok(Cow::Owned(v)),
         Err(errs) => Err(PayloadError::Validation(errs)),
@@ -1006,5 +1022,43 @@ mod tests {
         assert_eq!(e.code.as_str(), "eof");
         assert_eq!(format!("{e}"), "x (byte 0)");
         assert_eq!(DecodeError::from(e).status(), 400);
+    }
+
+    #[test]
+    fn decode_and_validate_tightens() {
+        use crate::compile::compile_with_limits;
+        use crate::desc::TypeDesc;
+
+        // §14.8: a caller-supplied bound tightens — it can never loosen
+        // the validator's compiled-in set.
+        let validator = crate::compile::compile(&TypeDesc::any()).expect("compile");
+        let tight = Limits {
+            max_items: 2,
+            ..Limits::default()
+        };
+        match decode_and_validate_with_limits(b"[1,2,3]", &validator, &tight) {
+            Err(PayloadError::Limit(e)) => {
+                assert_eq!(e.entries()[0].code, ErrorCode::MaxItems);
+            }
+            r => panic!("expected items limit, got {r:?}"),
+        }
+        assert!(decode_and_validate_with_limits(b"[1,2]", &validator, &tight).is_ok());
+        // The default bound leaves the payload alone.
+        assert!(decode_and_validate(b"[1,2,3]", &validator).is_ok());
+
+        // A looser caller bound never wins over the validator's own.
+        let strict = compile_with_limits(
+            &TypeDesc::any(),
+            Limits {
+                max_items: 1,
+                ..Limits::default()
+            },
+        )
+        .expect("compile");
+        assert!(matches!(
+            decode_and_validate_with_limits(b"[1,2]", &strict, &Limits::default()),
+            Err(PayloadError::Limit(_))
+        ));
+        assert!(decode_and_validate_with_limits(b"[1]", &strict, &Limits::default()).is_ok());
     }
 }

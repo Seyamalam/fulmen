@@ -64,6 +64,15 @@ fn render() -> HeaderValue {
     }
 }
 
+/// Current time as an IMF-fixdate `Date` header value.
+///
+/// The connection layer adds this to every response that lacks `Date`
+/// (`service.rs`); exported for socket-free dispatch paths that produce
+/// wire responses without the server transport.
+pub fn date_header() -> HeaderValue {
+    render()
+}
+
 /// Write `secs` (Unix time) as an IMF-fixdate into `out`.
 ///
 /// `Sun, 06 Nov 1994 08:49:37 GMT` — day/month decomposition via Howard

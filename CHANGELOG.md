@@ -132,9 +132,17 @@ exists. Move the `Unreleased` entries under the new version heading first.
   the resolved instance rather than read from the wire.
 - `fulmen.testing` (M3.21, DESIGN.md §22): `TestClient` and
   `AsyncTestClient` drive a `Fulmen` app end-to-end through the compiled
-  pipeline on an ephemeral loopback server (`serve_for_test` — the
-  socket-free dispatch entry point §22 describes is a native
-  follow-up). `.request` plus `.get`/`.post`/`.put`/`.patch`/`.delete`/
+  pipeline. The default transport is socket-free: the native
+  `DispatchClient` (`dispatch_for_test`) compiles the app once, runs
+  `on_startup`, and its `request(method, path, headers, body)` drives
+  the same `PyDispatcher` a socket request takes — routing, hooks,
+  guards, extraction, DI, handler, encoding, response hooks, error
+  routing — on a one-worker tokio runtime, returning
+  `(status, headers, body)` with `date`/`content-length` filled in when
+  absent; `use_sockets=True` opts back into `serve_for_test` on an
+  ephemeral loopback port (the `serve` fixture still binds a real
+  server for tests that need one). `.request` plus
+  `.get`/`.post`/`.put`/`.patch`/`.delete`/
   `.head`/`.options` convenience methods take `params`, `data`
   (form mapping or raw), `json`, `headers` and `cookies`; redirects
   follow by default; responses surface `status`/`headers`/`body`/
@@ -147,6 +155,22 @@ exists. Move the `Unreleased` entries under the new version heading first.
   problem responses still behave exactly as in production.
   `AsyncTestClient` exposes the same surface as `async def` methods for
   `asyncio.run` tests.
+- Tighten-only request limits (M3.23, DESIGN.md §14.3/§14.8):
+  `Fulmen(limits={"max_depth": …, "max_items": …, "max_str_bytes": …})`
+  declares the app's JSON decoder bounds and
+  `PluginContext.limits(…)` lets a plugin declare tighter bounds for
+  the scope it was `use()`d on — the whole app for `app.use()`, the
+  group and its children for `group.use()`. Plugins can only make the
+  app's limits stricter: a declared field looser than the app's (or
+  than the §14.3 default when the app leaves it unset) aggregates into
+  `StartupError` naming the field, the plugin and both values; an app
+  value looser than the defaults is refused outright, as is `limits=`
+  on a mounted group. The tightest applicable bound is baked into each
+  route's compiled entry and applied during body decoding, schema
+  validation and output validation; routes outside a plugin's scope
+  keep the app's limits. Repeated `ctx.limits()` calls merge by taking
+  the stricter value per field. Unknown fields, non-`int` and
+  non-positive values are rejected at declaration time.
 - Provider dependency injection (M3.10–M3.13, DESIGN.md §12):
   `@provider(scope=…)` / `app.provide(fn_or_value, …)` declare providers
   and `ctx.add_provider(…)` lets plugins feed the same graph;

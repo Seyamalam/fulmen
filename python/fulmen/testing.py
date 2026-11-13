@@ -10,13 +10,15 @@ def test_create_user():
         assert r.json()["id"] > 0
 ```
 
-`TestClient` compiles the app and serves it on an ephemeral loopback
-port via the same `serve_for_test` path `run()` compiles to — every
-request exercises the real router, hooks, extractors and error routing;
-no socket-free `dispatch` entry point exists on the native side yet, so
-loopback is the honest in-process stand-in for §22's dispatch drive
-(tracked as a native follow-up). Startup hooks run on `start()` /
-entering the `with` block, shutdown hooks on `stop()` / exiting.
+`TestClient` compiles the app once, then drives requests through
+`dispatch_for_test` — the socket-free entry point that runs the same
+compiled pipeline (routing, hooks, extractors, handler, encoding,
+response hooks and error routing) with no listener or HTTP framing.
+`use_sockets=True` is the escape hatch: the client falls back to
+`serve_for_test` on an ephemeral loopback port for tests that need a
+real server (the `serve` fixture uses the same path). Startup hooks run
+on `start()` / entering the `with` block, shutdown hooks on `stop()` /
+exiting.
 
 With `raise_server_errors=True` (the default) an unhandled handler
 exception is re-raised in the test instead of returning the `500`
@@ -38,7 +40,7 @@ import urllib.parse
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from fulmen._fulmen import TestServer, serve_for_test
+from fulmen._fulmen import DispatchClient, TestServer, dispatch_for_test, serve_for_test
 from fulmen.app import Fulmen
 from fulmen.constraints import UNSET
 from fulmen.errors import HTTPError, ValidationError, problem_for
@@ -113,11 +115,12 @@ class TestClient:
         assert r.status == 201
     ```
 
-    Requests go through the app's compiled pipeline on an ephemeral
-    loopback server (`serve_for_test`), so routers, hooks, extractors
-    and error routing behave exactly as in production. Startup and
-    shutdown lifecycle hooks run on enter/exit — `start()`/`stop()` work
-    outside a `with` block too.
+    Requests go through the app's compiled pipeline via
+    `dispatch_for_test` — the socket-free native entry point — so
+    routers, hooks, extractors and error routing behave exactly as in
+    production without opening a socket. Startup and shutdown lifecycle
+    hooks run on enter/exit — `start()`/`stop()` work outside a `with`
+    block too.
 
     Args:
         app: The application under test.
@@ -129,7 +132,10 @@ class TestClient:
         headers: Headers sent on every request.
         cookies: Cookies sent on every request.
         follow_redirects: Follow `Location` redirects (default `True`).
-        uvloop / debug: Forwarded to `serve_for_test`.
+        uvloop / debug: Forwarded to the compile.
+        use_sockets: Serve on an ephemeral loopback port
+            (`serve_for_test`) instead of dispatching in-process — the
+            escape hatch for tests that need a real server.
     """
 
     __test__ = False  # not a pytest class
@@ -144,6 +150,7 @@ class TestClient:
         follow_redirects: bool = True,
         uvloop: bool | None = None,
         debug: bool = False,
+        use_sockets: bool = False,
     ) -> None:
         self.app = app
         self.raise_server_errors = raise_server_errors
@@ -152,7 +159,9 @@ class TestClient:
         self.follow_redirects = follow_redirects
         self._uvloop = uvloop
         self._debug = debug
+        self._use_sockets = use_sockets
         self._server: TestServer | None = None
+        self._client: DispatchClient | None = None
         # A `BaseException` catch-all loses MRO routing to every
         # user-registered `on_error`, so it only ever sees exceptions
         # that would render as the built-in problem response. It is
@@ -167,23 +176,36 @@ class TestClient:
 
     @property
     def base_url(self) -> str:
-        """`http://host:port` once started (`""` before)."""
-        return f"http://{self._server.addr()}" if self._server is not None else ""
+        """`http://host:port` on sockets; `http://testserver` in-process
+        (no port exists); `""` before `start()`."""
+        if self._server is not None:
+            return f"http://{self._server.addr()}"
+        return "http://testserver" if self._client is not None else ""
 
     def start(self) -> None:
-        """Compile the app, run startup hooks and bind the test server."""
-        if self._server is None:
-            self._server = serve_for_test(
-                self.app._compile_native(),  # pyright: ignore[reportPrivateUsage] - testing lives in-package, like conftest
-                uvloop=self._uvloop,
-                debug=self._debug,
-            )
+        """Compile the app, run startup hooks and ready the client."""
+        if self._server is None and self._client is None:
+            if self._use_sockets:
+                self._server = serve_for_test(
+                    self.app._compile_native(),  # pyright: ignore[reportPrivateUsage] - testing lives in-package, like conftest
+                    uvloop=self._uvloop,
+                    debug=self._debug,
+                )
+            else:
+                self._client = dispatch_for_test(
+                    self.app._compile_native(),  # pyright: ignore[reportPrivateUsage] - same package
+                    uvloop=self._uvloop,
+                    debug=self._debug,
+                )
 
     def stop(self) -> None:
-        """Shut the test server down, running shutdown hooks once."""
+        """Shut the client down, running shutdown hooks once."""
         if self._server is not None:
             self._server.stop()
             self._server = None
+        if self._client is not None:
+            self._client.stop()
+            self._client = None
 
     def __enter__(self) -> TestClient:
         self.start()
@@ -317,22 +339,9 @@ class TestClient:
         follow_redirects: bool,
         redirects: int,
     ) -> TestResponse:
-        """One round-trip over `http.client`, following redirects."""
-        server = self._server
-        if server is None:  # request() starts lazily, so this is unreachable
-            raise RuntimeError("TestClient request before start()")
-        host, _, port = server.addr().rpartition(":")
-        conn = http.client.HTTPConnection(host, int(port), timeout=30)
-        try:
-            conn.request(method, target, body=body, headers=headers)
-            raw = conn.getresponse()
-            status, response_headers, response_body = (
-                raw.status,
-                raw.getheaders(),
-                raw.read(),
-            )
-        finally:
-            conn.close()
+        """One round-trip over the dispatch client or `http.client`,
+        following redirects."""
+        status, response_headers, response_body = self._roundtrip(method, target, body, headers)
 
         location = next(
             (value for name, value in response_headers if name.lower() == "location"),
@@ -354,6 +363,29 @@ class TestClient:
         if status == 303 or (status in (301, 302) and method not in ("GET", "HEAD")):
             method, body = "GET", None
         return self._send(method, next_target, body, headers, follow_redirects, redirects + 1)
+
+    def _roundtrip(
+        self,
+        method: str,
+        target: str,
+        body: bytes | None,
+        headers: dict[str, str],
+    ) -> tuple[int, list[tuple[str, str]], bytes]:
+        """Issue one request — in-process dispatch, or the loopback
+        socket when `use_sockets` was chosen."""
+        if self._client is not None:
+            return self._client.request(method, target, list(headers.items()), body)
+        server = self._server
+        if server is None:  # request() starts lazily, so this is unreachable
+            raise RuntimeError("TestClient request before start()")
+        host, _, port = server.addr().rpartition(":")
+        conn = http.client.HTTPConnection(host, int(port), timeout=30)
+        try:
+            conn.request(method, target, body=body, headers=headers)
+            raw = conn.getresponse()
+            return raw.status, raw.getheaders(), raw.read()
+        finally:
+            conn.close()
 
 
 class AsyncTestClient:

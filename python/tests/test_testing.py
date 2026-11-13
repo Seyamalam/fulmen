@@ -232,7 +232,8 @@ def test_response_surface() -> None:
         assert r.header("content-type") == "application/json"
         assert r.header("no-such") is None
         assert "200" in repr(r)
-        assert client.base_url.startswith("http://127.0.0.1:")
+        # The default transport dispatches in-process — no port exists.
+        assert client.base_url == "http://testserver"
 
 
 def test_404_and_405() -> None:

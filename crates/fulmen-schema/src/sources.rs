@@ -230,8 +230,24 @@ pub fn validate_text<'a>(
     validator: &Validator,
     source: Source,
 ) -> Result<Cow<'a, Value<'a>>, ValidationErrors> {
+    validate_text_with_limits(text, validator, source, &Limits::default())
+}
+
+/// `validate_text` under `limits`, tightened against the validator's
+/// compiled-in set — a caller can only make validation stricter
+/// (DESIGN.md §14.8).
+///
+/// # Errors
+///
+/// Same contract as [`validate_text`].
+pub fn validate_text_with_limits<'a>(
+    text: &'a str,
+    validator: &Validator,
+    source: Source,
+    limits: &Limits,
+) -> Result<Cow<'a, Value<'a>>, ValidationErrors> {
     let input = Value::str(text);
-    match validator.validate_out(&input, source, Mode::Lax) {
+    match validator.validate_out_with_limits(&input, source, Mode::Lax, limits) {
         Ok(Checked::Same(_)) => Ok(Cow::Owned(input)),
         Ok(Checked::New(v)) => Ok(Cow::Owned(v)),
         Err(errs) => Err(errs),
@@ -549,5 +565,25 @@ mod tests {
             decode_cookie_with_limits("a=1;b=2;c=3;d=4", &limits),
             Err(SourceError::Limit(_))
         ));
+    }
+
+    #[test]
+    fn validate_text_limits() {
+        use crate::compile::compile;
+        use crate::desc::TypeDesc;
+
+        let validator = compile(&TypeDesc::str()).expect("compile");
+        let tight = Limits {
+            max_str_bytes: 3,
+            ..Limits::default()
+        };
+        // §14.8: the caller's bound applies mid-walk — a longer value
+        // fails `max_str_len` under the tightened set only.
+        assert!(validate_text_with_limits("ab", &validator, Source::Header, &tight).is_ok());
+        assert!(validate_text("abcd", &validator, Source::Header).is_ok());
+        assert!(
+            validate_text_with_limits("abcd", &validator, Source::Header, &tight).is_err(),
+            "tightened max_str_bytes rejects an over-long header"
+        );
     }
 }

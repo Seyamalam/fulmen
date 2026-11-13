@@ -9,6 +9,7 @@ use std::time::Duration;
 use fulmen_core::pipeline::resolve_hooks;
 use fulmen_core::{APP_SCOPE, AppDecl, CompiledApp, HookDecl, Method, Phase, RouteDecl};
 use fulmen_plugin_sdk::host::{HookArgs, HookOutcome, LoadedPlugin, ResponseMut};
+use fulmen_schema::Limits;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyTuple};
@@ -169,6 +170,110 @@ pub(crate) struct LifecycleHook {
     pub(crate) is_async: bool,
 }
 
+/// The request-parsing bounds an app or plugin may declare — `None`
+/// leaves a field alone (§14.3/§14.8). `max_desc_depth` is compile-time
+/// only, so it is never a request limit a plugin can touch.
+#[derive(Clone, Copy, Debug, Default)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "fields mirror `Limits` and the Python kwarg names — the `max_` prefix is the public vocabulary"
+)]
+struct LimitSpec {
+    /// Input nesting depth bound.
+    max_depth: Option<u32>,
+    /// Items/entries bound for any `Array`/`Object` input.
+    max_items: Option<usize>,
+    /// Byte-length bound for `Str`/`Bytes` inputs.
+    max_str_bytes: Option<usize>,
+}
+
+impl LimitSpec {
+    /// The declared bounds over `Limits::default()` — undeclared fields
+    /// keep the default, so the result is the caller's effective set.
+    fn effective(&self) -> Limits {
+        let defaults = Limits::default();
+        Limits {
+            max_depth: self.max_depth.unwrap_or(defaults.max_depth),
+            max_items: self.max_items.unwrap_or(defaults.max_items),
+            max_str_bytes: self.max_str_bytes.unwrap_or(defaults.max_str_bytes),
+            ..defaults
+        }
+    }
+
+    /// Push a problem for every declared field looser than `bound` —
+    /// §14.8's tightening-only rule. `owner`/`bound_name` name the
+    /// parties so the startup error identifies field, owner, the bound
+    /// value and the declared value.
+    fn check_tightened(
+        &self,
+        bound: &Limits,
+        owner: &str,
+        bound_name: &str,
+        problems: &mut Vec<String>,
+    ) {
+        if let Some(declared) = self.max_depth {
+            check_limit_field(
+                problems,
+                owner,
+                "max_depth",
+                u64::from(declared),
+                u64::from(bound.max_depth),
+                bound_name,
+            );
+        }
+        if let Some(declared) = self.max_items {
+            check_limit_field(
+                problems,
+                owner,
+                "max_items",
+                declared as u64,
+                bound.max_items as u64,
+                bound_name,
+            );
+        }
+        if let Some(declared) = self.max_str_bytes {
+            check_limit_field(
+                problems,
+                owner,
+                "max_str_bytes",
+                declared as u64,
+                bound.max_str_bytes as u64,
+                bound_name,
+            );
+        }
+    }
+}
+
+/// One problem line for a limit declared looser than its bound (§14.8):
+/// names the field, who declared it, the declared value and the bound.
+fn check_limit_field(
+    problems: &mut Vec<String>,
+    owner: &str,
+    field: &str,
+    declared: u64,
+    bound: u64,
+    bound_name: &str,
+) {
+    if declared > bound {
+        problems.push(format!(
+            "{owner} declares a looser `{field}` limit: {declared} exceeds {bound_name} {bound}"
+        ));
+    }
+}
+
+/// One plugin's scope-bound limit declaration (§14.8): at compile the
+/// spec must tighten the app's limits, then it applies to every route
+/// in `scope` (the plugin's `use()` target — the app for scope `0`, or
+/// the group and its children otherwise).
+struct ScopeLimits {
+    /// The scope the declaration applies to (`APP_SCOPE` for the app).
+    scope: u32,
+    /// The declaring plugin's name — reported in startup problems.
+    plugin: String,
+    /// The declared fields.
+    spec: LimitSpec,
+}
+
 /// The native half of a `Fulmen` application: route and error-handler
 /// declarations recorded until [`Fulmen.run`](python/fulmen/app.py) compiles
 /// them.
@@ -194,6 +299,12 @@ pub(crate) struct NativeApp {
     /// owning its shared library — both must outlive the declaration
     /// phase, so [`compile_app`] clones them into `AppInner`.
     native_plugins: Vec<(Arc<LoadedPlugin>, Py<PyAny>)>,
+    /// The app's declared request limits (`Fulmen(limits=…)`, §14.3) —
+    /// all-`None` keeps `Limits::default()`.
+    limit_spec: LimitSpec,
+    /// Plugin-declared scope limits (`PluginContext.limits`, §14.8) —
+    /// checked against `limit_spec` at compile, then applied per route.
+    scope_limits: Vec<ScopeLimits>,
     /// `Fulmen(debug=True)` — §11.6 output validation; OR-ed with the
     /// serving-level `debug` flag at compile.
     pub(crate) debug: bool,
@@ -214,6 +325,8 @@ impl NativeApp {
             startup_hooks: Vec::new(),
             shutdown_hooks: Vec::new(),
             native_plugins: Vec::new(),
+            limit_spec: LimitSpec::default(),
+            scope_limits: Vec::new(),
             debug,
         }
     }
@@ -309,6 +422,49 @@ impl NativeApp {
         }
         self.native_plugins.push((plugin, keep));
         Ok(())
+    }
+
+    /// Record the app's request limits (`Fulmen(limits=…)`, §14.3):
+    /// `None` leaves a field at its default. Declared values are checked
+    /// against the defaults at compile — limits only ever tighten, so a
+    /// looser declaration is a startup problem (§14.8).
+    #[pyo3(signature = (max_depth=None, max_items=None, max_str_bytes=None))]
+    fn set_limits(
+        &mut self,
+        max_depth: Option<u32>,
+        max_items: Option<usize>,
+        max_str_bytes: Option<usize>,
+    ) {
+        self.limit_spec = LimitSpec {
+            max_depth,
+            max_items,
+            max_str_bytes,
+        };
+    }
+
+    /// Record one plugin's declared limits for `scope`
+    /// (`PluginContext.limits`, §14.8). Compile validates each field
+    /// against the app's limits — a looser field is a startup problem
+    /// naming the field, the plugin and both values; a tighter field
+    /// applies to the scope's routes.
+    #[pyo3(signature = (scope, plugin, max_depth=None, max_items=None, max_str_bytes=None))]
+    fn add_scope_limits(
+        &mut self,
+        scope: u32,
+        plugin: String,
+        max_depth: Option<u32>,
+        max_items: Option<usize>,
+        max_str_bytes: Option<usize>,
+    ) {
+        self.scope_limits.push(ScopeLimits {
+            scope,
+            plugin,
+            spec: LimitSpec {
+                max_depth,
+                max_items,
+                max_str_bytes,
+            },
+        });
     }
 
     /// Record one `@app.on_error(exc_cls)` registration under `scope`.
@@ -575,6 +731,21 @@ pub(crate) fn compile_app(
     let mut decls = AppDecl::new();
     let mut entries: Vec<HandlerEntry> = Vec::with_capacity(native.routes.len());
     let mut problems: Vec<String> = Vec::new();
+    // §14.8: limits only ever tighten. The app can't declare looser than
+    // the §14.3 defaults, and a plugin can't declare looser than the
+    // app — every violation reports field, owner and both values.
+    let app_limits = native.limit_spec.effective();
+    native
+        .limit_spec
+        .check_tightened(&Limits::default(), "the app", "the default", &mut problems);
+    for scoped in &native.scope_limits {
+        scoped.spec.check_tightened(
+            &app_limits,
+            &format!("plugin `{}`", scoped.plugin),
+            "the app's",
+            &mut problems,
+        );
+    }
     let mut has_async = native.error_handlers.iter().any(|e| e.is_async)
         || native
             .hooks
@@ -630,6 +801,7 @@ pub(crate) fn compile_app(
             response_contract: response_contract(py, registration),
             error_table,
             wants_request,
+            limits: route_limits(&app_limits, &native.scope_limits, &registration.layers),
         });
     }
 
@@ -950,6 +1122,20 @@ fn check_spec(
         return None;
     }
     Some(spec)
+}
+
+/// The effective limits for one route (§14.8): the app's bounds
+/// tightened by every plugin declaration whose scope covers the route —
+/// an `APP_SCOPE` declaration covers all routes, a group scope covers
+/// its own routes and its children's (the same rule hooks resolve by).
+fn route_limits(app: &Limits, scoped: &[ScopeLimits], layers: &[u32]) -> Limits {
+    scoped.iter().fold(*app, |limits, s| {
+        if s.scope == APP_SCOPE || layers.contains(&s.scope) {
+            limits.tightened(&s.spec.effective())
+        } else {
+            limits
+        }
+    })
 }
 
 /// `usize` route index to `u32` without a panic path (the table is tiny).
