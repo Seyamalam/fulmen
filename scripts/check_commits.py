@@ -17,7 +17,7 @@ TYPES = "build|chore|ci|docs|feat|fix|perf|refactor|revert|security|style|test"
 SCOPES = "core|server|schema|security|py|cli|plugins|adapters|docs|deps|release|repo"
 HEADER = re.compile(rf"^(?:{TYPES})(?:\((?:{SCOPES})\))?!?: [a-z0-9`].{{0,70}}[^.]$")
 SIGNOFF = re.compile(r"^Signed-off-by: .+ <[^@\s]+@[^@\s]+>$", re.MULTILINE)
-EXEMPT = re.compile(r"^(?:Merge |Revert \"|fixup! |squash! )")
+EXEMPT = re.compile(r"^(?:Merge\b|Revert \"|fixup! |squash! )")
 
 
 def problems(message: str) -> list[str]:
