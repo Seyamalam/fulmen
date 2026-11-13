@@ -1204,6 +1204,7 @@ def test_mounted_group_limits_are_refused() -> None:
 
 def test_plugin_limits_setup_problem_keeps_message_shape() -> None:
     """A `ctx.limits` ValueError inside setup joins the setup problems."""
+
     class Bad:
         name = "bad"
         version = "1.0"

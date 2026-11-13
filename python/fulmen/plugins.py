@@ -103,9 +103,7 @@ def _validate_limits(limits: Mapping[str, object], *, owner: str) -> dict[str, i
     for field, value in limits.items():
         if field not in LIMIT_FIELDS:
             names = ", ".join(sorted(LIMIT_FIELDS))
-            raise ValueError(
-                f"{owner} declares unknown limit {field!r} (expected one of: {names})"
-            )
+            raise ValueError(f"{owner} declares unknown limit {field!r} (expected one of: {names})")
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{owner} limit `{field}` must be a positive integer, got {value!r}")
         out[field] = value

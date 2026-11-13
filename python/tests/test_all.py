@@ -19,8 +19,7 @@ def test_native_module_loads():
 def test_cli_info(capsys):
     assert main(["info"]) == 0
     assert (
-        "native components: core, plugin-sdk, schema, security, server"
-        in capsys.readouterr().out
+        "native components: core, plugin-sdk, schema, security, server" in capsys.readouterr().out
     )
 
 

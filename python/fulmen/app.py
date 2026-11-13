@@ -700,11 +700,7 @@ class Fulmen:
                 allowed = self._limits.get(field)
                 bound = allowed if allowed is not None else _plugins._DEFAULT_LIMITS[field]  # pyright: ignore[reportPrivateUsage] - same package
                 if declared > bound:
-                    who = (
-                        f"the app's {allowed}"
-                        if allowed is not None
-                        else f"the default {bound}"
-                    )
+                    who = f"the app's {allowed}" if allowed is not None else f"the default {bound}"
                     plan.problems.append(
                         f"plugin `{use.meta.name}` declares a looser `{field}` limit: "
                         f"{declared} exceeds {who}"
