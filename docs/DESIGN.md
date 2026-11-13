@@ -970,8 +970,19 @@ Health endpoints bypass the queue.
 
 ### 15.1 Interfaces
 
-Each adapter interface is a Rust trait in core and a Python `Protocol`.
-Adapters can be written in either language.
+Each adapter interface is a Rust trait in `fulmen-core::adapters` and a
+Python `Protocol` in `fulmen.adapters.interfaces`. Adapters can be written
+in either language: a Rust implementation registered with the app is
+invoked from the pipeline with no Python crossing; a Python implementation
+is called through the executor bridge (one crossing per call). `Validator`
+is the exception — `supports`/`compile`/`json_schema` run once per type at
+registration under the GIL, so it is synchronous.
+
+Store failures raise an `AdapterError` subclass — `NotFoundError` (unknown
+id or expired lease), `StoreFullError` (bounded store at capacity),
+`StoreUnavailableError` (backend unreachable), `UnsupportedError`
+(operation the adapter cannot honour). The owning plugin maps them to
+responses: unavailable is a 503, a contract violation is a bug (500).
 
 ```python
 class SessionStore(Protocol):
@@ -1022,7 +1033,15 @@ stay off the GIL.
 
 `fulmen-testkit` ships a test suite per interface. A third-party adapter
 passes `pytest --fulmen-adapter=my_pkg:MyStore` to prove it behaves like the
-built-ins (TTL expiry, concurrency, error handling).
+built-ins (TTL expiry, concurrency, error handling). The class is imported
+and instantiated with no arguments; each suite runs only when the instance
+satisfies that suite's `Protocol`, so one flag covers whatever an adapter
+implements. The `Validator` suite also needs a type the adapter supports
+and one it rejects — adapters declare them under a `conformance_types`
+attribute (`(supported, unsupported)`); without it that suite skips. On
+the Rust side the same suites are functions in the `fulmen-testkit`
+crate that take `&dyn Trait`; `cargo test -p fulmen-testkit` runs them
+against the built-in stores.
 
 ## 16. Security features
 
