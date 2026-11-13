@@ -23,15 +23,18 @@ the same `ctx.config` slot — plugins already read only their own slice.
 
 from __future__ import annotations
 
+import ctypes
 import dataclasses
+import importlib
 import inspect
+import os
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
 
 from fulmen import openapi as _openapi
-from fulmen._fulmen import resolve_plugin_order
+from fulmen._fulmen import describe_native_plugin, resolve_plugin_order
 
 if TYPE_CHECKING:
     from fulmen.app import Fulmen
@@ -40,6 +43,7 @@ __all__ = [
     "CheckFn",
     "CheckRule",
     "CliHandler",
+    "NativePlugin",
     "Plugin",
     "PluginContext",
     "PluginHandle",
@@ -209,6 +213,7 @@ class PluginContext:
         "_hooks",
         "_lifecycle",
         "_mounted",
+        "_native",
         "_plugin_name",
         "_providers",
         "_routes",
@@ -224,6 +229,7 @@ class PluginContext:
         self._error_handlers: list[tuple[type[BaseException], _Handler, bool]] = []
         self._lifecycle: list[tuple[str, _Handler, bool]] = []
         self._mounted: list[Fulmen] = []
+        self._native: list[tuple[object, int | None, object]] = []
         self._providers: list[object] = []
         self._components: dict[str, dict[str, Any]] = {}
         self._cli: dict[str, CliHandler] = {}
@@ -266,6 +272,7 @@ class PluginContext:
             lifecycle=self._lifecycle,
             routes=self._routes,
             mounted=self._mounted,
+            native=self._native,
             providers=self._providers,
             components=self._components,
             cli=self._cli,
@@ -434,6 +441,24 @@ class PluginContext:
 
         return decorator
 
+    # -- native plugins (§13.4, M3.16) -------------------------------------------
+
+    def add_native_plugin(
+        self, capsule: object, *, priority: int | None = None, keep: object = None
+    ) -> None:
+        """Stage a `fulmen.plugin.v1` descriptor capsule (§13.4).
+
+        `capsule` carries the plugin's `FulmenPluginV1` descriptor —
+        obtained from `NativePlugin`, a `get_fulmen_plugin()` export, or a
+        ctypes `PyCapsule_New` shim. At compile the app validates the
+        descriptor's ABI and registers every hooked phase natively — the
+        hooks run on the dispatch thread with zero Python crossings.
+        `priority` namespaces the hooks' ordering band (default
+        `PRIORITY_USER`); `keep` (default the capsule itself) is held by
+        the compiled app so the shared library stays mapped."""
+        self._ensure_open()
+        self._native.append((capsule, priority, capsule if keep is None else keep))
+
     # -- providers seam (§12, M3.10) -------------------------------------------
 
     def add_provider(self, provider: object) -> object:
@@ -541,6 +566,110 @@ class PluginContext:
         self._closed = True
 
 
+_PyCapsule_New = ctypes.pythonapi.PyCapsule_New
+_PyCapsule_New.restype = ctypes.py_object
+_PyCapsule_New.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p)
+
+# The §13.4 capsule name the host extracts (`FULMEN_PLUGIN_CAPSULE`).
+_CAPSULE_NAME = b"fulmen.plugin.v1"
+
+# Shared-library suffixes recognised as `spec` paths in `NativePlugin`.
+_LIBRARY_SUFFIXES = frozenset({".so", ".dylib", ".dll"})
+
+
+class NativePlugin:
+    """A native (Rust) plugin loaded for `app.use()` (DESIGN.md §13.4).
+
+    `spec` is either a shared-library path (a `.so`/`.dylib`/`.dll`
+    suffix or any path containing a separator) whose `symbol` export
+    returns the `FulmenPluginV1` descriptor, or an importable module name
+    exposing `get_fulmen_plugin() -> capsule` (or a `fulmen_plugin`
+    capsule attribute). The descriptor is validated eagerly — a wrong
+    `abi_version` raises `StartupError` at construction, naming the
+    expected and found versions.
+
+    The plugin's `name`/`version` come from the descriptor; `requires`,
+    `conflicts`, `scope` and `priority` behave exactly like a Python
+    plugin's. Its hooks register under `priority` (default
+    `PRIORITY_USER`) and run inline on dispatch threads — a native-only
+    route still costs exactly one Python crossing (§8).
+
+    `use(plugin, config)` serialises the config mapping as the plugin's
+    `config_json`.
+    """
+
+    def __init__(
+        self,
+        spec: str | os.PathLike[str],
+        *,
+        symbol: str = "fulmen_plugin_v1",
+        priority: int | None = None,
+        requires: Sequence[str] = (),
+        conflicts: Sequence[str] = (),
+        scope: str = "any",
+    ) -> None:
+        self.requires = list(requires)
+        self.conflicts = list(conflicts)
+        self.scope = scope
+        self.priority = priority
+        self._owner, self._capsule = _load_plugin_capsule(spec, symbol)
+        name, version, abi_version, phases = describe_native_plugin(self._capsule)
+        self.name = name
+        self.version = version
+        #: The descriptor's ABI version — `fulmen_plugin_sdk`'s
+        #: `FULMEN_PLUGIN_ABI` when it was built.
+        self.abi_version = abi_version
+        #: The phases the plugin hooks, in pipeline order.
+        self.phases = tuple(phases)
+
+    def setup(self, ctx: PluginContext) -> NativePlugin:
+        """Stage the descriptor capsule — the only registration a native
+        plugin needs; `handle.state` is the plugin itself."""
+        ctx.add_native_plugin(self._capsule, priority=self.priority, keep=self)
+        return self
+
+    def __repr__(self) -> str:
+        return f"<fulmen.NativePlugin {self.name} {self.version} abi={self.abi_version}>"
+
+
+def _is_library_path(spec: str) -> bool:
+    """`spec` names a shared library, not an importable module."""
+    if os.sep in spec or (os.altsep is not None and os.altsep in spec):
+        return True
+    return os.path.splitext(spec)[1] in _LIBRARY_SUFFIXES
+
+
+def _load_plugin_capsule(spec: str | os.PathLike[str], symbol: str) -> tuple[object, object]:
+    """`(owner, capsule)` — the descriptor in a `fulmen.plugin.v1`
+    PyCapsule plus whatever keeps the plugin's code mapped (the loaded
+    library or module)."""
+    text = os.fspath(spec)
+    if _is_library_path(text):
+        library = ctypes.CDLL(text)
+        try:
+            entry = getattr(library, symbol)
+        except AttributeError:
+            raise ValueError(f"{text}: not a fulmen native plugin (no `{symbol}` export)") from None
+        entry.restype = ctypes.c_void_p
+        entry.argtypes = []
+        pointer = entry()
+        if not pointer:
+            raise ValueError(f"{text}: `{symbol}` returned a null plugin descriptor")
+        return library, _PyCapsule_New(ctypes.c_void_p(pointer), _CAPSULE_NAME, None)
+    module = importlib.import_module(text)
+    capsule = getattr(module, "fulmen_plugin", None)
+    if capsule is None:
+        getter = getattr(module, "get_fulmen_plugin", None)
+        if callable(getter):
+            capsule = getter()
+    if capsule is None:
+        raise TypeError(
+            f"module {text!r}: not a fulmen native plugin "
+            "(expected a `get_fulmen_plugin()` export or a `fulmen_plugin` capsule)"
+        )
+    return module, capsule
+
+
 @dataclasses.dataclass(frozen=True)
 class StagedContributions:
     """Snapshot of one plugin's `PluginContext` registrations —
@@ -553,6 +682,7 @@ class StagedContributions:
     lifecycle: list[tuple[str, _Handler, bool]]
     routes: list[tuple[str, str, _Handler, _openapi.OperationMeta]]
     mounted: list[Fulmen]
+    native: list[tuple[object, int | None, object]]
     providers: list[object]
     components: dict[str, dict[str, Any]]
     cli: dict[str, CliHandler]

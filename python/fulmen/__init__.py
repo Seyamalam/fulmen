@@ -71,7 +71,13 @@ if typing.TYPE_CHECKING:
         Request,
         UploadFile,
     )
-    from fulmen.plugins import CheckRule, Plugin, PluginContext, PluginHandle
+    from fulmen.plugins import (
+        CheckRule,
+        NativePlugin,
+        Plugin,
+        PluginContext,
+        PluginHandle,
+    )
     from fulmen.request import Headers
     from fulmen.responses import (
         Accepted,
@@ -136,6 +142,7 @@ _MODULES: dict[str, str] = {
     "Model": "fulmen.model",
     "ModelConfig": "fulmen.model",
     "MultipleOf": "fulmen.constraints",
+    "NativePlugin": "fulmen.plugins",
     "NativeValidator": "fulmen.adapters.native",
     "NoContent": "fulmen.responses",
     "NotAcceptable": "fulmen.errors",
@@ -237,6 +244,7 @@ __all__ = [
     "Model",
     "ModelConfig",
     "MultipleOf",
+    "NativePlugin",
     "NativeValidator",
     "NoContent",
     "NotAcceptable",

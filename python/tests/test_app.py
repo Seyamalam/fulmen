@@ -472,9 +472,7 @@ def test_route_specs_walks_when_no_walked_list_is_given() -> None:
 
     specs, problems = app._route_specs({})
     assert problems == []
-    assert [(spec[0], spec[1]) for spec, _meta, _layers, _route_di in specs] == [
-        ("GET", "/x")
-    ]
+    assert [(spec[0], spec[1]) for spec, _meta, _layers, _route_di in specs] == [("GET", "/x")]
 
 
 def test_declared_route_on_openapi_path_wins() -> None:
